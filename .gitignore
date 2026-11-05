@@ -13,3 +13,9 @@ bin/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Generated native macOS project/build products
+.build/
+native/macos/Medina.xcodeproj/
+native/macos/DerivedData/
+Packages/MedinaCore/.build/

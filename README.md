@@ -72,11 +72,15 @@ Medina scans at startup, watches for changes, and periodically reconciles the li
 make test       # Go tests
 make vet        # Go static checks
 make web-dev    # Vite UI; proxies API requests to localhost:17843
+make macos-test # Swift API/domain and AVKit playback tests
+make macos-build # Generate and build the native macOS app (macOS/Xcode required)
 ```
 
 Run the backend separately with `CONTENT_ROOT=/path/to/courses go run ./cmd/medina`. `make build` rebuilds the embedded UI and server. For a local API-only binary, use `go build -tags no_frontend -o bin/medina ./cmd/medina` (no Node build required).
 
 API documentation: **[/swagger/](http://127.0.0.1:17843/swagger/)**. The source specification is [`api/openapi.yaml`](api/openapi.yaml).
+
+The native macOS client is under active development. Its XcodeGen source is [`native/macos/project.yml`](native/macos/project.yml); testable API/domain code is in [`Packages/MedinaCore`](Packages/MedinaCore), and playback is in [`Packages/MedinaPlayback`](Packages/MedinaPlayback). The client now uses AVKit/AVPlayer for macOS-supported media and its native player controls. It does not bundle third-party decoders; MKV/WebM and external subtitle compatibility is not promised.
 
 ### Optional logging stack
 

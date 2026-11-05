@@ -1,0 +1,28 @@
+name: Medina
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  MedinaCore:
+    path: ../../Packages/MedinaCore
+  MedinaPlayback:
+    path: ../../Packages/MedinaPlayback
+targets:
+  Medina:
+    type: application
+    platform: macOS
+    sources:
+      - path: Medina/App
+    dependencies:
+      - package: MedinaCore
+      - package: MedinaPlayback
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.medina.native
+        PRODUCT_NAME: Medina
+        INFOPLIST_FILE: Medina/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: YES
