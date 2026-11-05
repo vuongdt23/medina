@@ -82,6 +82,8 @@ API documentation: **[/swagger/](http://127.0.0.1:17843/swagger/)**. The source 
 
 The native macOS client is under active development. Its XcodeGen source is [`native/macos/project.yml`](native/macos/project.yml); testable API/domain code is in [`Packages/MedinaCore`](Packages/MedinaCore), and playback is in [`Packages/MedinaPlayback`](Packages/MedinaPlayback). The client now uses AVKit/AVPlayer for macOS-supported media and its native player controls. It does not bundle third-party decoders; MKV/WebM and external subtitle compatibility is not promised.
 
+The native playback workspace adapts to resizing and macOS tiling, with a resizable sidebar on larger windows and temporary course navigation on compact ones. It includes lesson search (⌘F), comfortable/compact outline density, dark Focus mode, native AVKit playback controls, and an auto-play preference. See [workspace behavior and the manual verification checklist](native/macos/README.md).
+
 ### Optional logging stack
 
 Run `docker compose up --build` to include Grafana, Loki, and Alloy. Grafana is at **http://127.0.0.1:3000**, with development credentials `admin` / `admin` (configurable in `.env`). In Explore, query `{service="medina"}`. Alloy needs privileged access to the Docker socket to collect container logs.

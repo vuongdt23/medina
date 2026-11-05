@@ -7,7 +7,7 @@ struct MedinaApp: App {
     var body: some Scene {
         WindowGroup {
             LibraryWindow()
-                .frame(minWidth: 900, minHeight: 560)
+                .frame(minWidth: 480, minHeight: 360)
         }
         .commands {
             CommandGroup(replacing: .newItem) { }
@@ -28,6 +28,12 @@ final class LibraryModel {
     var selectedCourseID: String? = UserDefaults.standard.string(forKey: "selectedCourseID")
     var tree: TreeNode?
     var selectedItemID: String?
+    var itemSelectionRevision = 0
+
+    func selectItem(id: String) {
+        selectedItemID = id
+        itemSelectionRevision += 1
+    }
     var status: IndexStatus?
     var playbackEngine: AVPlaybackEngine?
     var lessonQueue: LessonQueue?
@@ -35,6 +41,9 @@ final class LibraryModel {
     var courseProgress: CourseProgress = .empty
     var progressEnabled = false
     var courseSearch = ""
+    var autoplayNext = UserDefaults.standard.object(forKey: "autoplayNext") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoplayNext, forKey: "autoplayNext") }
+    }
     /// Which top-level screen is showing. The library grid is the anchor;
     /// opening a card pushes into a focused course workspace.
     enum Screen: Equatable { case library; case course(String) }
@@ -122,7 +131,7 @@ final class LibraryModel {
             playbackEngine = engine
         }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
-        selectedItemID = lesson.id
+        selectItem(id: lesson.id)
         playbackEngine?.play()
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
@@ -167,9 +176,9 @@ final class LibraryModel {
         // position the player last reported.
         markCurrentLessonComplete()
         guard var queue = lessonQueue, let current = queue.current,
-              let next = queue.naturalEOF(for: current.id, autoplay: true) else { return }
+              let next = queue.naturalEOF(for: current.id, autoplay: autoplayNext) else { return }
         lessonQueue = queue
-        loadQueuedLesson(next)
+        loadQueuedLesson(next, userInitiated: false)
     }
 
     /// Reports the active lesson's position to the server, throttled to roughly
@@ -220,10 +229,19 @@ final class LibraryModel {
         courseProgress = next
     }
 
-    private func loadQueuedLesson(_ lesson: TreeNode) {
+    private func loadQueuedLesson(_ lesson: TreeNode, userInitiated: Bool = true) {
         guard let client, let stream = lesson.streamUrl else { return }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
-        selectedItemID = lesson.id
+        if userInitiated {
+            selectItem(id: lesson.id)
+        } else {
+            // Auto-advance must not dismiss navigation or interrupt a resource
+            // preview the learner is currently reading.
+            let selected = tree.flatMap { tree in
+                CourseTree.outline(of: tree).first(where: { $0.id == selectedItemID })?.item
+            }
+            if selected?.type != "asset" { selectedItemID = lesson.id }
+        }
         playbackEngine?.play()
         lastReportedLessonID = nil
         lastReportedAt = .distantPast

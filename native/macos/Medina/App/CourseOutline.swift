@@ -2,14 +2,21 @@ import SwiftUI
 import AppKit
 import MedinaCore
 
-/// The course sidebar: a "Continue" header driven by progress and a segmented
-/// structure bar, then collapsible sections. Lessons are the primary rows;
+/// The course sidebar: a Continue card before playback, then styled collapsible
+/// sections and a single course-progress footer. Lessons are the primary rows;
 /// supporting files live in a collapsible "Resources" folder tree per section
 /// and at course level. Subtitles are never shown here — they belong to playback.
 struct CourseOutline: View {
     @Bindable var model: LibraryModel
     let tree: TreeNode
+    var short = false
+    var focusSearchRequest = 0
+    var onDismiss: (() -> Void)? = nil
+    @FocusState private var searchFocused: Bool
     @Environment(\.colorScheme) private var scheme
+    @AppStorage("compactLessonRows") private var compactRows = false
+    @State private var search = ""
+    @State private var jumpRequest = 0
 
     @State private var expandedSections: Set<String> = []
     @State private var expandedResources: Set<String> = []
@@ -20,20 +27,26 @@ struct CourseOutline: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            resumeHeader
+            navigationHeader
+            if !short { resumeHeader }
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 4) {
-                        ForEach(groups) { group in
-                            SectionBlock(
-                                group: group,
-                                depth: 0,
-                                model: model,
-                                expandedSections: $expandedSections,
-                                expandedResources: $expandedResources
-                            )
+                    LazyVStack(spacing: 8) {
+                        if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                                SectionBlock(
+                                    group: group,
+                                    depth: 0,
+                                    number: groups.prefix(index).filter { !$0.isSynthetic }.count + 1,
+                                    model: model,
+                                    expandedSections: $expandedSections,
+                                    expandedResources: $expandedResources
+                                )
+                            }
+                        } else {
+                            searchResults
                         }
-                        if !courseResources.isEmpty {
+                        if search.isEmpty && !courseResources.isEmpty {
                             ResourceDisclosure(
                                 id: "\(tree.id)#course-resources",
                                 title: "Course resources",
@@ -51,14 +64,121 @@ struct CourseOutline: View {
                 .onChange(of: model.lessonQueue?.current?.id) { _, id in
                     guard let id else { return }
                     expandSectionContaining(lessonID: id)
-                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                }
+                .onChange(of: jumpRequest) { _, _ in
+                    guard let id = model.lessonQueue?.current?.id else { return }
+                    search = ""
+                    expandSectionContaining(lessonID: id)
+                    Task { @MainActor in
+                        // Let the cleared search and expanded sections lay out.
+                        await Task.yield()
+                        withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    }
                 }
             }
+            progressFooter
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.canvas(scheme))
         .onAppear { seedExpansionIfNeeded() }
-        .onChange(of: tree.id) { _, _ in seededForCourse = nil; seedExpansionIfNeeded() }
+        .onChange(of: tree.id) { _, _ in seededForCourse = nil; search = ""; seedExpansionIfNeeded() }
+        .onChange(of: focusSearchRequest) { _, _ in searchFocused = true }
+    }
+
+    // MARK: Navigation and search
+
+    private var navigationHeader: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Course content").font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Button { jumpRequest += 1 } label: {
+                    Image(systemName: "scope")
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.lessonQueue?.current == nil)
+                .help("Jump to playing lesson")
+                .accessibilityLabel("Jump to playing lesson")
+                Menu {
+                    Toggle("Compact lesson rows", isOn: $compactRows)
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Outline density")
+                .accessibilityLabel("Outline density")
+                if let onDismiss {
+                    Button("Done", action: onDismiss)
+                        .buttonStyle(.borderless)
+                        .keyboardShortcut(.cancelAction)
+                }
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search lessons or sections", text: $search)
+                    .focused($searchFocused)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !search.isEmpty {
+                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Clear lesson search")
+                }
+            }
+            .padding(9)
+            .background(Theme.hairline(scheme), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(14)
+        .background(Theme.card(scheme))
+    }
+
+    @ViewBuilder private var searchResults: some View {
+        let results = LessonSearch.results(in: tree, query: search)
+        if results.isEmpty {
+            Text("No matching lessons")
+                .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity).padding(.vertical, 24)
+        }
+        ForEach(results) { result in
+            Button {
+                if model.lessonQueue?.current?.id != result.id { model.playLesson(result.lesson) }
+                model.selectItem(id: result.id)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    if !result.sectionPath.isEmpty {
+                        Text(result.sectionPath)
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .lineLimit(2).padding(.horizontal, 9)
+                    }
+                    LessonRow(lesson: result.lesson,
+                              isSelected: result.id == model.selectedItemID,
+                              isPlaying: result.id == model.lessonQueue?.current?.id,
+                              progress: model.courseProgress.progress(for: result.id),
+                              durationSeconds: model.courseProgress.progress(for: result.id)?.durationSeconds)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder private var progressFooter: some View {
+        if model.progressEnabled, model.courseProgress.totalCount > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Course progress")
+                    Spacer()
+                    Text("\(model.courseProgress.completedCount)/\(model.courseProgress.totalCount) · \(Int(model.courseProgress.fraction * 100))%")
+                        .monospacedDigit()
+                }
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+                ProgressBar(fraction: model.courseProgress.fraction)
+            }
+            .padding(14)
+            .background(Theme.card(scheme))
+        }
     }
 
     // MARK: Expansion state
@@ -96,7 +216,7 @@ struct CourseOutline: View {
     // MARK: Resume header
 
     @ViewBuilder private var resumeHeader: some View {
-        if model.progressEnabled, let target = model.resumeTarget {
+        if model.playbackEngine == nil, model.progressEnabled, let target = model.resumeTarget {
             let p = model.courseProgress.progress(for: target.id)
             let started = (p?.positionSeconds ?? 0) > 1
             VStack(spacing: 10) {
@@ -105,9 +225,8 @@ struct CourseOutline: View {
                         Text(started ? "Continue where you left off" : "Start learning")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
-                            .textCase(.uppercase)
                         Text(target.title)
-                            .font(Theme.display(14, .semibold))
+                            .font(.system(size: 14, weight: .semibold))
                             .lineLimit(1)
                     }
                     Spacer()
@@ -118,42 +237,36 @@ struct CourseOutline: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
                 }
-                if model.courseProgress.totalCount > 0 {
-                    SegmentedProgressBar(segments: segments)
-                    HStack(spacing: 8) {
-                        ProgressBar(fraction: model.courseProgress.fraction)
-                        Text("\(Int(model.courseProgress.fraction * 100))%")
-                            .font(.system(size: 11, weight: .semibold)).monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                }
             }
             .padding(14)
             .background(Theme.card(scheme))
             .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.hairline(scheme)), alignment: .bottom)
         }
     }
-
-    private var segments: [(weight: Int, fraction: Double, isComplete: Bool)] {
-        groups.filter { $0.total > 0 }.map { (weight: $0.total, fraction: $0.fraction, isComplete: $0.isComplete) }
-    }
 }
 
 // MARK: - Section block
 
-/// A collapsible section: a header with status, title, count, and a play
-/// button, revealing its ordered children (lesson rows and nested subsection
-/// blocks) and a resources disclosure. Sections nest recursively.
+/// Section cards carry hierarchy and progress, not another set of play controls.
+/// Nested sections use a lighter treatment instead of stacking cards in cards.
 struct SectionBlock: View {
     let group: SectionGroup
     let depth: Int
+    var number: Int? = nil
     @Bindable var model: LibraryModel
     @Binding var expandedSections: Set<String>
     @Binding var expandedResources: Set<String>
     @Environment(\.colorScheme) private var scheme
 
-    /// First playable lesson in the whole subtree — what "play section" starts.
-    private var firstLesson: TreeNode? { CourseTree.lessons(in: group.section).first }
+    @State private var isHovering = false
+    private var containsCurrentLesson: Bool {
+        guard let id = model.lessonQueue?.current?.id else { return false }
+        return CourseTree.lessons(in: group.section).contains { $0.id == id }
+    }
+    private var sectionLabel: String {
+        if depth > 0 { return "SUBSECTION" }
+        return number.map { String(format: "SECTION %02d", $0) } ?? "SECTION"
+    }
     private var isExpanded: Bool { group.isSynthetic || expandedSections.contains(group.id) }
     private var resourcesID: String { "\(group.id)#resources" }
 
@@ -190,82 +303,88 @@ struct SectionBlock: View {
                         .padding(.top, 2)
                     }
                 }
-                .padding(.leading, group.isSynthetic ? 0 : 6)
-                .padding(.top, group.isSynthetic ? 0 : 2)
+                .padding(.horizontal, group.isSynthetic ? 0 : 8)
+                .padding(.bottom, group.isSynthetic ? 0 : 8)
+                .overlay(alignment: .leading) {
+                    if depth > 0 {
+                        Rectangle().fill(Theme.hairline(scheme))
+                            .frame(width: 1).padding(.leading, 3)
+                    }
+                }
             }
         }
-        .background(
-            group.isSynthetic ? Color.clear
-                : Theme.card(scheme).opacity(scheme == .dark ? 0.5 : 0.7),
-            in: RoundedRectangle(cornerRadius: 9)
-        )
+        .background {
+            if !group.isSynthetic && depth == 0 {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(containsCurrentLesson ? Theme.cardSelected(scheme) : Theme.card(scheme))
+            }
+        }
+        .overlay {
+            if !group.isSynthetic && depth == 0 {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(containsCurrentLesson ? Theme.accent.opacity(0.22) : Theme.hairline(scheme))
+            }
+        }
     }
 
     private func lessonRow(_ lesson: TreeNode) -> some View {
-        LessonRow(
-            lesson: lesson,
-            isSelected: lesson.id == model.selectedItemID,
-            isPlaying: lesson.id == model.lessonQueue?.current?.id,
-            progress: model.courseProgress.progress(for: lesson.id),
-            durationSeconds: lessonDuration(lesson.id)
-        )
-        .id(lesson.id)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            model.selectedItemID = lesson.id
-            model.playLesson(lesson)
+        Button {
+            if model.lessonQueue?.current?.id != lesson.id { model.playLesson(lesson) }
+            model.selectItem(id: lesson.id)
+        } label: {
+            LessonRow(
+                lesson: lesson,
+                isSelected: lesson.id == model.selectedItemID,
+                isPlaying: lesson.id == model.lessonQueue?.current?.id,
+                progress: model.courseProgress.progress(for: lesson.id),
+                durationSeconds: lessonDuration(lesson.id)
+            )
         }
+        .buttonStyle(.plain)
+        .id(lesson.id)
     }
 
     private var header: some View {
         Button { toggle(&expandedSections, group.id) } label: {
-            HStack(spacing: 8) {
-                DisclosureChevron(isOpen: isExpanded)
-                statusDot
-                Text(group.section.title)
-                    .font(Theme.display(depth > 0 ? 12 : 13, .semibold))
-                    .foregroundStyle(group.isComplete ? .secondary : (depth > 0 ? .secondary : .primary))
-                    .strikethrough(group.isComplete, color: .secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 6)
-                if group.isComplete {
-                    Text("DONE")
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(Theme.done)
-                }
-                Text("\(group.completed)/\(group.total)")
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                if firstLesson != nil {
-                    Button {
-                        if let first = firstLesson { model.playLesson(first) }
-                    } label: {
-                        Image(systemName: "play.fill").font(.system(size: 9, weight: .bold))
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        Text(sectionLabel)
+                            .font(.system(size: 10, weight: .bold)).tracking(1)
+                            .foregroundStyle(containsCurrentLesson ? Theme.accent : .secondary)
+                        Spacer(minLength: 0)
+                        HStack(spacing: 4) {
+                            if group.isComplete {
+                                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold))
+                            }
+                            Text("\(group.completed)/\(group.total)").monospacedDigit()
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(group.isComplete ? Theme.done : .secondary)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Theme.accent)
-                    .help("Play this section")
+                    Text(group.section.title)
+                        .font(.system(size: depth > 0 ? 13 : 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                DisclosureChevron(isOpen: isExpanded, size: 11)
             }
-            .padding(.vertical, 8).padding(.horizontal, 9)
+            .padding(.vertical, depth > 0 ? 10 : 14)
+            .padding(.horizontal, 13)
+            .background(isHovering ? Theme.hairline(scheme) : .clear,
+                        in: RoundedRectangle(cornerRadius: 12))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(group.section.title)
+        .accessibilityValue("\(group.completed) of \(group.total) lessons completed, \(isExpanded ? "expanded" : "collapsed")")
     }
 
     private func toggle(_ set: inout Set<String>, _ id: String) {
         withAnimation(.easeInOut(duration: 0.2)) {
             if set.contains(id) { set.remove(id) } else { set.insert(id) }
-        }
-    }
-
-    @ViewBuilder private var statusDot: some View {
-        if group.isComplete {
-            Image(systemName: "circle.fill").font(.system(size: 9)).foregroundStyle(Theme.done)
-        } else if group.completed > 0 {
-            Image(systemName: "circle.fill").font(.system(size: 9)).foregroundStyle(Theme.accent)
-        } else {
-            Image(systemName: "circle").font(.system(size: 9)).foregroundStyle(.tertiary)
         }
     }
 
@@ -285,45 +404,49 @@ struct LessonRow: View {
     let progress: LessonProgress?
     let durationSeconds: Double?
     @Environment(\.colorScheme) private var scheme
+    @AppStorage("compactLessonRows") private var compactRows = false
 
     var body: some View {
-        HStack(spacing: 9) {
-            statusGlyph
-            Image(systemName: lesson.mediaKind == "audio" ? "music.note" : "play.rectangle.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(isPlaying ? Theme.accent : .primary)
-                .frame(width: 16)
+        HStack(spacing: 10) {
+            statusGlyph.frame(width: 18)
             Text(lesson.title)
-                .font(.system(size: 12.5))
+                .font(.system(size: 14, weight: isPlaying ? .semibold : .regular))
                 .foregroundStyle(.primary)
-                .lineLimit(1)
-            Spacer(minLength: 6)
-            if isPlaying {
-                Image(systemName: "waveform")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .symbolEffect(.variableColor.iterative, options: .repeating)
-            } else if let label = durationSeconds.flatMap({ Duration.lessonLabel(seconds: $0) }) {
+                .lineLimit(compactRows ? 1 : 2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let label = durationSeconds.flatMap({ Duration.lessonLabel(seconds: $0) }) {
                 Text(label)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 12)).monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 5).padding(.horizontal, 9)
-        .background(isSelected ? Theme.accent.opacity(scheme == .dark ? 0.22 : 0.13) : .clear,
-                    in: RoundedRectangle(cornerRadius: 7))
+        .padding(.vertical, compactRows ? 6 : 10).padding(.horizontal, 10)
+        .frame(minHeight: compactRows ? 32 : 44)
+        .background(isSelected ? Theme.cardSelected(scheme) : .clear,
+                    in: RoundedRectangle(cornerRadius: 8))
+        .overlay(alignment: .leading) {
+            if isPlaying {
+                Capsule().fill(Theme.accent).frame(width: 3).padding(.vertical, 7)
+            }
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(isPlaying ? "Current lesson" : (progress?.isEffectivelyComplete == true ? "Completed" : ""))
         .help(lesson.originalName ?? lesson.title)
     }
 
     @ViewBuilder private var statusGlyph: some View {
-        if progress?.isEffectivelyComplete == true {
+        if isPlaying {
+            Image(systemName: "play.fill")
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.accent)
+        } else if progress?.isEffectivelyComplete == true {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12)).foregroundStyle(Theme.done)
+                .font(.system(size: 14)).foregroundStyle(Theme.done)
         } else if let f = progress?.fraction, f > 0.01 {
-            ProgressRing(fraction: f, size: 13, lineWidth: 2, showsLabel: false)
+            ProgressRing(fraction: f, size: 15, lineWidth: 2, showsLabel: false)
         } else {
-            Image(systemName: "circle")
-                .font(.system(size: 12)).foregroundStyle(.tertiary)
+            Image(systemName: lesson.mediaKind == "audio" ? "music.note" : "play.rectangle")
+                .font(.system(size: 14)).foregroundStyle(.secondary)
         }
     }
 }
@@ -348,12 +471,12 @@ struct ResourceDisclosure: View {
             Button(action: onToggle) {
                 HStack(spacing: 8) {
                     DisclosureChevron(isOpen: isExpanded)
-                    Image(systemName: "paperclip").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 16)
-                    Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                    Image(systemName: "folder").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 16)
+                    Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
                     Spacer(minLength: 6)
                     Text("\(fileCount) file\(fileCount == 1 ? "" : "s")")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 12)).monospacedDigit()
+                        .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 5).padding(.horizontal, 9)
                 .contentShape(Rectangle())
@@ -410,7 +533,7 @@ struct ResourceFolderRow: View {
                         DisclosureChevron(isOpen: isOpen, size: 9)
                         Image(systemName: isOpen ? "folder.fill" : "folder")
                             .font(.system(size: 12)).foregroundStyle(Theme.accentSoft).frame(width: 16)
-                        Text(node.title).font(.system(size: 12)).foregroundStyle(.primary).lineLimit(1)
+                        Text(node.title).font(.system(size: 13)).foregroundStyle(.primary).lineLimit(2)
                         Spacer(minLength: 6)
                         Text("\(fileCount)")
                             .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
@@ -456,7 +579,7 @@ struct ResourceFileRow: View {
         HStack(spacing: 8) {
             Color.clear.frame(width: CGFloat(depth) * 14)
             FileTypeIcon(fileExtension: node.fileExtension, name: node.originalName ?? node.title)
-            Text(node.title).font(.system(size: 12)).foregroundStyle(.primary).lineLimit(1)
+            Text(node.title).font(.system(size: 13)).foregroundStyle(.primary).lineLimit(2)
             Spacer(minLength: 6)
             if isHovering {
                 Button { Task { await download() } } label: {
@@ -475,7 +598,7 @@ struct ResourceFileRow: View {
         .background(isSelected ? Theme.accent.opacity(scheme == .dark ? 0.2 : 0.12) : .clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
-        .onTapGesture { model.selectedItemID = node.id }
+        .onTapGesture { model.selectItem(id: node.id) }
         .onHover { isHovering = $0 }
         .help(node.originalName ?? node.title)
     }

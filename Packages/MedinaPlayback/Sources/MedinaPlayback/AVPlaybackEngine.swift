@@ -23,6 +23,7 @@ public final class AVPlaybackEngine {
     public private(set) var title = ""
     public private(set) var currentTime: Double = 0
     public private(set) var duration: Double = 0
+    public private(set) var playbackSpeed: Float = 1
     public private(set) var audioOptions: [String] = []
     public private(set) var subtitleOptions: [String] = []
     public private(set) var selectedAudioIndex: Int?
@@ -114,9 +115,21 @@ public final class AVPlaybackEngine {
     }
 
     public func setSpeed(_ speed: Float) {
+        guard speed.isFinite else { return }
         let bounded = min(2.5, max(0.5, speed))
-        if player.rate == 0 { player.defaultRate = bounded }
-        else { player.rate = bounded }
+        playbackSpeed = bounded
+        player.defaultRate = bounded
+        if player.rate != 0 { player.rate = bounded }
+    }
+
+    public func replay() {
+        guard let item = currentItem else { return }
+        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard finished, let self, self.currentItem === item else { return }
+                self.play()
+            }
+        }
     }
 
     public func setVolume(_ volume: Float) {
@@ -163,8 +176,9 @@ public final class AVPlaybackEngine {
         if let item = currentItem {
             let length = CMTimeGetSeconds(item.duration)
             if length.isFinite { duration = length }
-            if state == .ready && player.rate > 0 { state = .playing }
+            if player.rate > 0 && (state == .ready || state == .paused || state == .ended) { state = .playing }
             else if player.rate == 0 && state == .playing { state = .paused }
+            if player.rate > 0 && playbackSpeed != player.rate { playbackSpeed = player.rate }
         }
     }
 

@@ -1,126 +1,202 @@
 import SwiftUI
+import Combine
 import MedinaCore
 import MedinaPlayback
 
-/// The focused course workspace: a top bar with a Back-to-Library control and
-/// the course title, over the structure outline beside the item inspector and
-/// player. Playback keeps running if the user navigates back to the library.
+/// Adaptive shell: the inspector and outline keep their identity through live
+/// resizing. Only their geometry changes; the AVPlayer remains model-owned.
 struct CourseFocus: View {
     @Bindable var model: LibraryModel
     @Environment(\.colorScheme) private var scheme
+    @AppStorage("workspaceSidebarWidth") private var preferredSidebarWidth = 360.0
+    @AppStorage("workspaceFocusMode") private var focusMode = false
+    @State private var layout: WorkspaceLayout = .standard
+    @State private var measuredWindow = false
+    @State private var compactContentOpen = false
+    @State private var dragStartWidth: Double?
+    @State private var focusSearchRequest = 0
+    private let ticker = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+
+    private var sidebarVisible: Bool {
+        layout == .compact ? compactContentOpen : !focusMode
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            Divider().overlay(Theme.hairline(scheme))
-            content
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                topBar
+                Divider()
+                if let tree = model.tree {
+                    workspace(tree: tree, size: geometry.size)
+                } else {
+                    ContentUnavailableView("Preparing course…", systemImage: "books.vertical",
+                                           description: Text("Course content will appear here when available."))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .onChange(of: geometry.size.width, initial: true) { _, width in
+                let next = WorkspaceLayout.resolve(width: width, previous: measuredWindow ? layout : nil)
+                measuredWindow = true
+                if next != layout { compactContentOpen = false }
+                layout = next
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.canvas(scheme))
+        .preferredColorScheme(focusMode && layout != .compact ? .dark : nil)
+        .onChange(of: model.itemSelectionRevision) { _, _ in compactContentOpen = false }
+        .onReceive(ticker) { _ in model.reportPlaybackProgress() }
+        .onDisappear { model.reportPlaybackProgress(force: true) }
     }
 
     private var topBar: some View {
         HStack(spacing: 12) {
             Button { model.backToLibrary() } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.left").font(.system(size: 12, weight: .bold))
-                    Text(model.libraries.first?.name ?? "Library").font(.system(size: 12.5, weight: .medium))
-                }
+                Label("Library", systemImage: "chevron.left")
+                    .labelStyle(.titleAndIcon)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.accent)
             .keyboardShortcut("[", modifiers: .command)
             .help("Back to Library (⌘[)")
 
-            Divider().frame(height: 18)
-
             Text(model.tree?.title ?? "Loading…")
-                .font(Theme.display(16, .bold))
+                .font(.system(size: 14, weight: .semibold))
                 .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(model.tree?.title ?? "")
 
-            Spacer()
-
-            if let playing = model.lessonQueue?.current?.title {
-                HStack(spacing: 6) {
-                    Image(systemName: "waveform")
-                        .foregroundStyle(Theme.accent)
-                        .symbolEffect(.variableColor.iterative, options: .repeating)
-                    Text(playing).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+            if let playing = model.lessonQueue?.current,
+               model.selectedItemID != playing.id {
+                Button { model.selectItem(id: playing.id) } label: {
+                    Image(systemName: "play.rectangle")
                 }
-                .frame(maxWidth: 240, alignment: .trailing)
+                .help("Return to playing lesson")
+                .accessibilityLabel("Return to playing lesson")
             }
+
+            Button {
+                if layout == .compact { compactContentOpen = true }
+                else { focusMode = false }
+                focusSearchRequest += 1
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .help("Search course lessons (⌘F)")
+            .accessibilityLabel("Search course lessons")
+
+            Button {
+                if layout == .compact { compactContentOpen.toggle() }
+                else { focusMode.toggle() }
+            } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .keyboardShortcut("s", modifiers: [.command, .control])
+            .help(sidebarVisible ? "Hide course content" : "Show course content")
+            .accessibilityLabel(sidebarVisible ? "Hide course content" : "Show course content")
+
         }
-        .padding(.horizontal, 16).padding(.vertical, 11)
+        .buttonStyle(.borderless)
+        .font(.system(size: 13, weight: .medium))
+        .tint(Theme.accent)
+        .padding(.horizontal, 16)
+        .frame(height: 48)
         .background(Theme.card(scheme))
     }
 
-    @ViewBuilder private var content: some View {
-        if let tree = model.tree {
-            HSplitView {
-                CourseOutline(model: model, tree: tree)
-                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 480)
-                inspector(tree: tree)
-                    .frame(minWidth: 420, maxWidth: .infinity)
+    private func workspace(tree: TreeNode, size: CGSize) -> some View {
+        let width = layout.sidebarWidth(preferred: preferredSidebarWidth, available: size.width)
+        let inline = sidebarVisible && layout != .compact
+        return ZStack(alignment: .leading) {
+            inspector(tree: tree, short: size.height < 540)
+                .padding(.leading, inline ? width + 6 : 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(!(layout == .compact && sidebarVisible))
+                .disabled(layout == .compact && sidebarVisible)
+                .accessibilityHidden(layout == .compact && sidebarVisible)
+
+            // In compact mode the navigation is a drawer, or a full-content
+            // view below 600pt. Never squeeze a sliver of video beside it.
+            if layout == .compact && sidebarVisible && size.width >= 600 {
+                Color.black.opacity(0.25)
+                    .onTapGesture { compactContentOpen = false }
+                    .accessibilityLabel("Dismiss course content")
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ContentUnavailableView {
-                Label("Preparing course…", systemImage: "books.vertical")
-            } description: {
-                Text("If this persists, the course may be empty or the server is unavailable.")
+
+            HStack(spacing: 0) {
+                CourseOutline(
+                    model: model, tree: tree, short: size.height < 540,
+                    focusSearchRequest: focusSearchRequest,
+                    onDismiss: layout == .compact ? { compactContentOpen = false } : nil
+                )
+                .frame(width: width)
+                if layout != .compact { resizeHandle(width: width) }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: width + (layout == .compact ? 0 : 6))
+            .frame(maxHeight: .infinity)
+            .background(Theme.canvas(scheme))
+            .offset(x: sidebarVisible ? 0 : -width - 6)
+            .opacity(sidebarVisible ? 1 : 0)
+            .allowsHitTesting(sidebarVisible)
+            .disabled(!sidebarVisible)
+            .accessibilityHidden(!sidebarVisible)
         }
+        .clipped()
     }
 
-    @ViewBuilder private func inspector(tree: TreeNode) -> some View {
-        let selected = CourseTree.outline(of: tree).first(where: { $0.id == model.selectedItemID })?.item
-        let isDocument = selected?.type == "asset"
-        let isLesson = selected?.type == "lesson"
+    private func resizeHandle(width: Double) -> some View {
+        Rectangle()
+            .fill(Theme.hairline(scheme))
+            .frame(width: 6)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if dragStartWidth == nil { dragStartWidth = width }
+                    preferredSidebarWidth = min(480, max(300, (dragStartWidth ?? width) + value.translation.width))
+                }
+                .onEnded { _ in dragStartWidth = nil })
+            .accessibilityLabel("Course sidebar width")
+            .accessibilityValue("\(Int(width)) points")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: preferredSidebarWidth = min(480, width + 20)
+                case .decrement: preferredSidebarWidth = max(300, width - 20)
+                @unknown default: break
+                }
+            }
+            .help("Drag to resize course content")
+    }
 
-        VStack(spacing: 0) {
-            if let engine = model.playbackEngine, !isDocument {
-                // Playing (or loading) media owns the surface — no "press play" page.
-                playbackPanel(engine)
-            } else if isDocument, let selected {
-                ItemDetail(
-                    item: selected,
-                    client: model.currentClient,
-                    progress: model.courseProgress.progress(for: selected.id),
-                    onPlay: { lesson in model.playLesson(lesson) }
-                )
+    @ViewBuilder private func inspector(tree: TreeNode, short: Bool) -> some View {
+        let selected = CourseTree.outline(of: tree).first(where: { $0.id == model.selectedItemID })?.item
+        if let selected, selected.type == "asset" {
+            ItemDetail(item: selected, client: model.currentClient,
+                       progress: model.courseProgress.progress(for: selected.id),
+                       onPlay: { model.playLesson($0) })
                 .id(selected.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if isLesson {
-                // A lesson is selected but the engine has not spun up yet; it is
-                // loading. Never show a redundant play placeholder.
-                VStack(spacing: 10) {
-                    ProgressView().controlSize(.large)
-                    Text(selected?.title ?? "Loading…").font(.callout).foregroundStyle(.secondary)
-                }
+        } else if let engine = model.playbackEngine {
+            PlaybackPanel(
+                engine: engine,
+                lessonTitle: model.lessonQueue?.current?.title ?? engine.title,
+                lessonContext: lessonContext(tree: tree),
+                upNextTitle: model.lessonQueue?.next?.title,
+                hasPrevious: model.lessonQueue?.previous != nil,
+                hasNext: model.lessonQueue?.next != nil,
+                short: short,
+                autoplay: Binding(get: { model.autoplayNext }, set: { model.autoplayNext = $0 }),
+                onPrevious: { model.playPrevious() },
+                onNext: { model.playNext() }
+            )
+        } else {
+            ContentUnavailableView("Choose a lesson or file", systemImage: "play.rectangle",
+                                   description: Text("Open course content to start learning."))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ContentUnavailableView("Choose a lesson or file",
-                                       systemImage: "text.aligncenter",
-                                       description: Text("Pick an item from the outline to read, preview, or play it."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.canvas(scheme))
     }
 
-    private func playbackPanel(_ engine: AVPlaybackEngine) -> PlaybackPanel {
-        PlaybackPanel(
-            engine: engine,
-            lessonTitle: model.lessonQueue?.current?.title ?? engine.title,
-            upNextTitle: model.lessonQueue?.next?.title,
-            hasPrevious: model.lessonQueue?.previous != nil,
-            hasNext: model.lessonQueue?.next != nil,
-            onPrevious: { model.playPrevious() },
-            onNext: { model.playNext() },
-            onStop: { model.stopPlayback() },
-            onTick: { model.reportPlaybackProgress() }
-        )
+    private func lessonContext(tree: TreeNode) -> String {
+        let lessons = CourseTree.lessons(in: tree)
+        guard let id = model.lessonQueue?.current?.id,
+              let index = lessons.firstIndex(where: { $0.id == id }) else { return "" }
+        return "Lesson \(index + 1) of \(lessons.count)"
     }
 }
