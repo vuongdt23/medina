@@ -44,6 +44,26 @@ Focus mode hides navigation and uses dark appearance in non-compact windows.
 - The Continue/Resume card appears only before a playback session is active.
 - With auto-play disabled, natural EOF shows completion; replay remains in AVKit.
 
+## App icon
+
+The Medina Station artwork is preserved in `Artwork/AppIcon.png`. The app uses
+an `AppIcon` asset catalog containing all ten standard macOS/Retina sizes. The
+prepared icons have transparent outer margins and retain the artwork's shadow.
+
+To regenerate the assets, run from the repository root:
+
+```sh
+swift native/macos/tools/generate-app-icon.swift \
+  native/macos/Artwork/AppIcon.png \
+  native/macos/Medina/App/Resources/Assets.xcassets/AppIcon.appiconset
+make macos-build
+```
+
+The background-removal step is specific to this dark tile on a white canvas;
+keep the original artwork if preparing a different icon design. Xcode compiles
+`AppIcon.icns` and the asset catalog and supplies the bundle icon metadata.
+Relaunch the application after rebuilding to refresh its Dock icon.
+
 ## Verification
 
 Automated: `make macos-test` covers layout thresholds/hysteresis, sidebar clamping,
