@@ -1,0 +1,70 @@
+services:
+  medina:
+    build:
+      context: .
+      args:
+        BUNDLE_FRONTEND: ${BUNDLE_FRONTEND:-true}
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8080"
+    environment:
+      BIND_ADDRESS: ${BIND_ADDRESS:-0.0.0.0:8080}
+      CONTENT_ROOT: ${CONTENT_ROOT:-/library}
+      DATABASE_PATH: ${DATABASE_PATH:-/data/course-media.sqlite}
+      LIBRARY_NAME: ${LIBRARY_NAME:-Development Library}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      SCAN_INTERVAL: ${SCAN_INTERVAL:-6h}
+      SCAN_DEBOUNCE: ${SCAN_DEBOUNCE:-2s}
+      SCAN_WORKERS: ${SCAN_WORKERS:-8}
+      SCAN_DIRECTORY_WORKERS: ${SCAN_DIRECTORY_WORKERS:-4}
+      SCAN_WATCH: ${SCAN_WATCH:-true}
+    volumes:
+      # Set LIBRARY_MOUNT in .env to swap the read-only library folder.
+      - "${LIBRARY_MOUNT:-./testdata}:/library:ro"
+      - course-media-data:/data
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.3
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./monitoring/loki-config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    # Named volumes are created root-owned; Loki needs write access to its data directory.
+    user: "0"
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.10.2
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./monitoring/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  course-media-data:
+  loki-data:
+  alloy-data:
+  grafana-data:

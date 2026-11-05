@@ -1,0 +1,7 @@
+1
+00:00:00,500 --> 00:00:03,500
+Welcome to the Medina playback test.
+
+2
+00:00:04,000 --> 00:00:07,500
+This H.264/AAC sample is served directly from the test library.

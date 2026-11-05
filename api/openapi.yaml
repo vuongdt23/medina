@@ -1,0 +1,132 @@
+openapi: 3.1.0
+info:
+  title: Medina API
+  version: 0.1.0
+servers:
+  - url: /api/v1
+paths:
+  /health:
+    get:
+      responses:
+        '200': { description: Service health }
+  /system/info:
+    get:
+      responses:
+        '200': { description: Service capabilities }
+  /index/status:
+    get:
+      responses:
+        '200':
+          description: Index state and current in-progress snapshot item count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [idle, scanning, failed] }
+                  itemCount: { type: integer, description: Number of entries in the active snapshot, including the previous baseline during reconciliation }
+                  progress:
+                    description: In-memory progress for the latest scan in this server process; absent before the first scan
+                    type: object
+                    properties:
+                      phase: { type: string, enum: [preparing, enumerating, canonicalizing, persisting, publishing, complete, failed] }
+                      entriesVisited: { type: integer, description: Entries visited once during enumeration, including ignored and unclassified entries }
+                      currentDirectory: { type: string, description: Root-relative directory currently being enumerated }
+                      currentOperation: { type: string, enum: ['', queued, listing, metadata, ready, visiting], description: Operation awaited by the ordered traversal }
+                      directoriesRead: { type: integer }
+                      activeDirectoryReads: { type: integer }
+                      activeMetadataReads: { type: integer }
+                      elapsedMs: { type: integer }
+                      enumerationMs: { type: integer, description: Aggregate directory-listing work time including active requests; concurrent operations overlap }
+                      metadataMs: { type: integer, description: Aggregate metadata work time including active requests; concurrent operations overlap }
+                      persistenceMs: { type: integer, description: Time spent persisting scanner batches; excludes generation preparation and final publication }
+                  activeGenerationId: { type: [string, 'null'] }
+                  lastScanStartedAt: { type: [string, 'null'], format: date-time }
+                  lastScanCompletedAt: { type: [string, 'null'], format: date-time }
+                  lastScanError: { type: [string, 'null'] }
+  /index/scan:
+    post:
+      summary: Start a singleton background library scan
+      description: Returns immediately. Poll /index/status for scan state and item count. A running scan cannot be resubmitted.
+      responses:
+        '202': { description: Scan accepted; poll the status endpoint }
+        '409': { description: A library scan is already running }
+  /libraries:
+    get:
+      responses:
+        '200': { description: Configured libraries }
+  /libraries/{libraryID}/courses:
+    get:
+      parameters:
+        - in: path
+          name: libraryID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Courses }
+  /courses/{courseID}:
+    get:
+      parameters:
+        - in: path
+          name: courseID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Course metadata }
+  /courses/{courseID}/tree:
+    get:
+      parameters:
+        - in: path
+          name: courseID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Recursive course tree }
+  /lessons/{itemID}/content:
+    get:
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Original lesson bytes }
+        '206': { description: Partial content }
+        '416': { description: Range not satisfiable }
+  /assets/{itemID}/preview:
+    get:
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Safe inline preview for supported document, image, or text assets }
+        '404': { description: Asset not found }
+        '415': { description: Unsupported asset preview type }
+  /assets/{itemID}/archive.zip:
+    get:
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ZIP archive of a directory asset }
+        '404': { description: Asset directory not found or unavailable }
+        '413': { description: Archive source-size, compressed-size, or file-count limit exceeded }
+        '500': { description: Archive read, compression, or temporary-storage failure }
+  /assets/{itemID}/content:
+    get:
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Original asset bytes }
+        '206': { description: Partial content }
+  /:
+    get:
+      responses:
+        '200': { description: Bundled diagnostic client }

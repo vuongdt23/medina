@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Medina API · Swagger UI</title>
+  <!-- Swagger UI static assets are bundled locally for offline use. -->
+  <link rel="stylesheet" href="/swagger-ui.css">
+  <style>body{margin:0}#loading{font:14px system-ui;padding:20px;color:#444}</style>
+</head>
+<body>
+  <div id="loading">Loading API documentation…</div>
+  <div id="swagger-ui"></div>
+  <script src="/swagger-ui-bundle.js"></script>
+  <script>
+    window.addEventListener('load', function () {
+      if (!window.SwaggerUIBundle) {
+        document.getElementById('loading').textContent = 'Swagger UI assets could not be loaded. Open /openapi.yaml or check network access.';
+        return;
+      }
+      document.getElementById('loading').remove();
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.yaml',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        displayRequestDuration: true,
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: 'BaseLayout'
+      });
+    });
+  </script>
+</body>
+</html>

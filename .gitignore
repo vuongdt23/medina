@@ -1,0 +1,15 @@
+# AI-generated planning/design docs (not committed)
+docs/
+.env
+.env.*
+!.env.example
+
+data/
+dist/
+node_modules/
+web/node_modules/
+bin/
+/medina
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

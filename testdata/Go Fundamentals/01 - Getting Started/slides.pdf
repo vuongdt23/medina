@@ -1,0 +1,70 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R >> >> /Contents 7 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+7 0 obj
+<< /Length 2192 >>
+stream
+q
+0.08 0.13 0.20 rg
+0 0 612 792 re f
+Q
+q 0.65 0.78 0.66 rg 54 723 504 2 re f Q
+q 0.91 0.95 0.93 rg BT /F2 28 Tf 1 0 0 1 54 685 Tm (Go Fundamentals) Tj ET Q
+q 0.65 0.78 0.66 rg BT /F1 11 Tf 1 0 0 1 54 655 Tm (01  /  Getting Started) Tj ET Q
+q 0.70 0.84 0.73 rg BT /F2 15 Tf 1 0 0 1 54 612 Tm (What is Go?) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 58 589 Tm (Go is a compiled, statically typed language designed for building clear, reliable) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 58 571 Tm (software. It combines a small language with fast builds, built-in concurrency, and a) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 58 553 Tm (strong standard library.) Tj ET Q
+q 0.70 0.84 0.73 rg BT /F2 15 Tf 1 0 0 1 54 530 Tm (Your first program) Tj ET Q
+q 0.12 0.18 0.23 rg 60 502 492 20 re f Q
+q 0.82 0.89 0.86 rg BT /F3 10 Tf 1 0 0 1 72 507 Tm (package main) Tj ET Q
+q 0.12 0.18 0.23 rg 60 479 492 20 re f Q
+q 0.82 0.89 0.86 rg BT /F3 10 Tf 1 0 0 1 72 484 Tm (import "fmt") Tj ET Q
+q 0.12 0.18 0.23 rg 60 456 492 20 re f Q
+q 0.82 0.89 0.86 rg BT /F3 10 Tf 1 0 0 1 72 461 Tm (func main\(\) {) Tj ET Q
+q 0.12 0.18 0.23 rg 60 433 492 20 re f Q
+q 0.82 0.89 0.86 rg BT /F3 10 Tf 1 0 0 1 72 438 Tm (    fmt.Println\("Hello, Go!"\)) Tj ET Q
+q 0.12 0.18 0.23 rg 60 410 492 20 re f Q
+q 0.82 0.89 0.86 rg BT /F3 10 Tf 1 0 0 1 72 415 Tm (}) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 58 392 Tm (Save the code in a file named main.go, then run it with:  go run main.go) Tj ET Q
+q 0.70 0.84 0.73 rg BT /F2 15 Tf 1 0 0 1 54 369 Tm (A few useful ideas) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 65 346 Tm (?  := declares and initializes a variable inside a function.) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 65 325 Tm (?  Functions can return more than one value, often a result and an error.) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 65 304 Tm (?  A package groups related Go source files.) Tj ET Q
+q 0.88 0.92 0.96 rg BT /F1 11 Tf 1 0 0 1 65 283 Tm (?  gofmt formats source code consistently.) Tj ET Q
+q 0.25 0.31 0.37 rg 54 58 504 1 re f Q
+q 0.62 0.68 0.74 rg BT /F1 9 Tf 1 0 0 1 54 40 Tm (Sample course handout  ?  Course Media Server test library) Tj ET Q
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000267 00000 n 
+0000000337 00000 n 
+0000000412 00000 n 
+0000000480 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2723
+%%EOF
