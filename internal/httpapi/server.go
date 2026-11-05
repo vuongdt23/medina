@@ -144,7 +144,7 @@ func (s *Server) routes() {
 	})
 	s.mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"status": "ok"}) })
 	s.mux.HandleFunc("GET /api/v1/system/info", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"name": "Medina", "version": "0.1.0", "apiVersion": "1", "capabilities": map[string]bool{"authentication": false, "transcoding": false, "progress": false, "fileWatching": !s.cfg.DisableWatching, "thumbnails": false}})
+		writeJSON(w, 200, map[string]any{"name": "Medina", "version": "0.1.0", "apiVersion": "1", "capabilities": map[string]bool{"authentication": false, "transcoding": false, "progress": true, "fileWatching": !s.cfg.DisableWatching, "thumbnails": false}})
 	})
 	s.mux.HandleFunc("GET /api/v1/index/status", func(w http.ResponseWriter, r *http.Request) {
 		v, e := s.store.Status(r.Context(), s.libraryID)
@@ -231,6 +231,9 @@ func (s *Server) routes() {
 		writeError(w, 404, "item_not_found", "Course not found.")
 	})
 	s.mux.HandleFunc("GET /api/v1/courses/{courseID}/tree", s.courseTree)
+	s.mux.HandleFunc("GET /api/v1/courses/{courseID}/progress", s.courseProgress)
+	s.mux.HandleFunc("PUT /api/v1/lessons/{itemID}/progress", s.putLessonProgress)
+	s.mux.HandleFunc("GET /api/v1/lessons/{itemID}/progress", s.getLessonProgress)
 	s.mux.HandleFunc("GET /api/v1/lessons/{itemID}/content", s.content)
 	s.mux.HandleFunc("GET /api/v1/assets/{itemID}/content", s.content)
 	s.mux.HandleFunc("GET /api/v1/assets/{itemID}/archive.zip", s.zipAssetDirectory)
@@ -349,6 +352,163 @@ func countTypes(items []scanner.Item, root, typ string) int {
 	}
 	walk(root)
 	return count
+}
+
+// lessonIDsUnder returns the set of lesson item IDs anywhere beneath a course,
+// mirroring the parent-chain walk used by countTypes. Progress is only tracked
+// for lessons, so this bounds what a course-progress response may contain.
+func lessonIDsUnder(items []scanner.Item, root string) map[string]bool {
+	children := map[string][]scanner.Item{}
+	for _, it := range items {
+		children[it.ParentID] = append(children[it.ParentID], it)
+	}
+	ids := map[string]bool{}
+	var walk func(string)
+	walk = func(p string) {
+		for _, it := range children[p] {
+			if it.Type == "lesson" {
+				ids[it.ID] = true
+			}
+			walk(it.ID)
+		}
+	}
+	walk(root)
+	return ids
+}
+
+// profileID extracts the opaque client profile identifier that scopes progress.
+// The server is single-tenant with no accounts; the client sends a stable UUID.
+func profileID(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Medina-Profile"))
+}
+
+type lessonProgressPayload struct {
+	PositionSeconds float64 `json:"positionSeconds"`
+	DurationSeconds float64 `json:"durationSeconds"`
+	Completed       bool    `json:"completed"`
+}
+
+func lessonProgressJSON(p sqlite.LessonProgress) map[string]any {
+	return map[string]any{
+		"itemId":          p.ItemID,
+		"positionSeconds": p.PositionSeconds,
+		"durationSeconds": p.DurationSeconds,
+		"completed":       p.Completed,
+		"updatedAt":       p.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func (s *Server) lessonExists(items []scanner.Item, id string) bool {
+	for i := range items {
+		if items[i].ID == id && items[i].Type == "lesson" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) putLessonProgress(w http.ResponseWriter, r *http.Request) {
+	profile := profileID(r)
+	if profile == "" {
+		writeError(w, 400, "invalid_request", "A X-Medina-Profile header is required.")
+		return
+	}
+	var payload lessonProgressPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, 400, "invalid_request", "The request body must be a JSON progress object.")
+		return
+	}
+	if payload.PositionSeconds < 0 || payload.DurationSeconds < 0 {
+		writeError(w, 400, "invalid_request", "Progress values must not be negative.")
+		return
+	}
+	items, e := s.items(r)
+	if e != nil {
+		writeError(w, 500, "internal_error", "Could not read indexed items.")
+		return
+	}
+	id := r.PathValue("itemID")
+	if !s.lessonExists(items, id) {
+		writeError(w, 404, "item_not_found", "Lesson not found.")
+		return
+	}
+	record := sqlite.LessonProgress{
+		ItemID:          id,
+		PositionSeconds: payload.PositionSeconds,
+		DurationSeconds: payload.DurationSeconds,
+		Completed:       payload.Completed,
+		UpdatedAt:       time.Now().UTC(),
+	}
+	if err := s.store.UpsertLessonProgress(r.Context(), s.libraryID, profile, record); err != nil {
+		writeError(w, 500, "internal_error", "Could not save lesson progress.")
+		return
+	}
+	writeJSON(w, 200, lessonProgressJSON(record))
+}
+
+func (s *Server) getLessonProgress(w http.ResponseWriter, r *http.Request) {
+	profile := profileID(r)
+	if profile == "" {
+		writeError(w, 400, "invalid_request", "A X-Medina-Profile header is required.")
+		return
+	}
+	id := r.PathValue("itemID")
+	record, ok, err := s.store.LessonProgressFor(r.Context(), s.libraryID, profile, id)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not read lesson progress.")
+		return
+	}
+	if !ok {
+		record = sqlite.LessonProgress{ItemID: id, UpdatedAt: time.Time{}}
+	}
+	writeJSON(w, 200, lessonProgressJSON(record))
+}
+
+func (s *Server) courseProgress(w http.ResponseWriter, r *http.Request) {
+	profile := profileID(r)
+	if profile == "" {
+		writeError(w, 400, "invalid_request", "A X-Medina-Profile header is required.")
+		return
+	}
+	items, e := s.items(r)
+	if e != nil {
+		writeError(w, 500, "internal_error", "Could not read indexed items.")
+		return
+	}
+	id := r.PathValue("courseID")
+	var found bool
+	for i := range items {
+		if items[i].ID == id && items[i].Type == "course" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, 404, "item_not_found", "Course not found.")
+		return
+	}
+	lessonIDs := lessonIDsUnder(items, id)
+	records, err := s.store.AllLessonProgress(r.Context(), s.libraryID, profile)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not read lesson progress.")
+		return
+	}
+	lessons := map[string]any{}
+	completedCount := 0
+	for _, p := range records {
+		if !lessonIDs[p.ItemID] {
+			continue
+		}
+		lessons[p.ItemID] = lessonProgressJSON(p)
+		if p.Completed {
+			completedCount++
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"lessons":        lessons,
+		"completedCount": completedCount,
+		"totalCount":     len(lessonIDs),
+	})
 }
 func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("itemID")

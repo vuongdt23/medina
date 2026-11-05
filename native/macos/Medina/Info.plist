@@ -2,6 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.medina.native</string>
+	<key>CFBundleName</key>
+	<string>Medina</string>
+	<key>CFBundleExecutable</key>
+	<string>Medina</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
 	<key>CFBundleDisplayName</key>
 	<string>Medina</string>
 	<key>LSApplicationCategoryType</key>

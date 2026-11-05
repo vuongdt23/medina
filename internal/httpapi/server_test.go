@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -281,5 +282,150 @@ func TestContentServesRangesAndRejectsTraversal(t *testing.T) {
 	}
 	if strings.Contains(badRec.Body.String(), root) {
 		t.Fatal("error leaked absolute path")
+	}
+}
+
+func TestLessonProgressRoundTripAndCourseAggregation(t *testing.T) {
+	root := t.TempDir()
+	course := filepath.Join(root, "Course")
+	if err := os.MkdirAll(course, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "lesson-a.mp4"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "lesson-b.mp4"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "progress.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.Config{BindAddress: "127.0.0.1:0", DatabasePath: "unused", ContentRoot: root, LibraryName: "Test"}
+	server, err := New(cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Scan(context.Background(), "library_default", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Items(context.Background(), "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var courseID, lessonA string
+	for _, it := range items {
+		switch {
+		case it.Type == "course":
+			courseID = it.ID
+		case it.Type == "lesson" && it.OriginalName == "lesson-a.mp4":
+			lessonA = it.ID
+		}
+	}
+	if courseID == "" || lessonA == "" {
+		t.Fatalf("library not indexed as expected: course=%q lessonA=%q", courseID, lessonA)
+	}
+	const profile = "profile-123"
+
+	// Capability flag advertises the feature.
+	infoRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(infoRec, httptest.NewRequest(http.MethodGet, "/api/v1/system/info", nil))
+	var info struct {
+		Capabilities map[string]bool `json:"capabilities"`
+	}
+	if err := json.Unmarshal(infoRec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !info.Capabilities["progress"] {
+		t.Fatal("progress capability should be advertised as true")
+	}
+
+	// PUT requires a profile header.
+	noProfile := httptest.NewRequest(http.MethodPut, "/api/v1/lessons/"+lessonA+"/progress", strings.NewReader(`{"positionSeconds":1}`))
+	noProfileRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(noProfileRec, noProfile)
+	if noProfileRec.Code != http.StatusBadRequest {
+		t.Fatalf("missing profile: expected 400, got %d", noProfileRec.Code)
+	}
+
+	// PUT rejects a malformed body.
+	badBody := httptest.NewRequest(http.MethodPut, "/api/v1/lessons/"+lessonA+"/progress", strings.NewReader("not json"))
+	badBody.Header.Set("X-Medina-Profile", profile)
+	badBodyRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badBodyRec, badBody)
+	if badBodyRec.Code != http.StatusBadRequest {
+		t.Fatalf("bad body: expected 400, got %d", badBodyRec.Code)
+	}
+
+	// PUT rejects an unknown lesson.
+	unknown := httptest.NewRequest(http.MethodPut, "/api/v1/lessons/does-not-exist/progress", strings.NewReader(`{"positionSeconds":1}`))
+	unknown.Header.Set("X-Medina-Profile", profile)
+	unknownRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unknownRec, unknown)
+	if unknownRec.Code != http.StatusNotFound {
+		t.Fatalf("unknown lesson: expected 404, got %d", unknownRec.Code)
+	}
+
+	// PUT then GET round-trips the stored record.
+	put := httptest.NewRequest(http.MethodPut, "/api/v1/lessons/"+lessonA+"/progress", strings.NewReader(`{"positionSeconds":42.5,"durationSeconds":100,"completed":true}`))
+	put.Header.Set("X-Medina-Profile", profile)
+	putRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put: expected 200, got %d (%s)", putRec.Code, putRec.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/lessons/"+lessonA+"/progress", nil)
+	getReq.Header.Set("X-Medina-Profile", profile)
+	getRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRec, getReq)
+	var record struct {
+		PositionSeconds float64 `json:"positionSeconds"`
+		Completed       bool    `json:"completed"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.PositionSeconds != 42.5 || !record.Completed {
+		t.Fatalf("round-trip mismatch: %+v", record)
+	}
+
+	// A different profile sees no progress for the same lesson.
+	otherGet := httptest.NewRequest(http.MethodGet, "/api/v1/lessons/"+lessonA+"/progress", nil)
+	otherGet.Header.Set("X-Medina-Profile", "someone-else")
+	otherRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(otherRec, otherGet)
+	var otherRecord struct {
+		Completed bool `json:"completed"`
+	}
+	if err := json.Unmarshal(otherRec.Body.Bytes(), &otherRecord); err != nil {
+		t.Fatal(err)
+	}
+	if otherRecord.Completed {
+		t.Fatal("progress leaked across profiles")
+	}
+
+	// Course aggregation counts the course's lessons and completions.
+	courseReq := httptest.NewRequest(http.MethodGet, "/api/v1/courses/"+courseID+"/progress", nil)
+	courseReq.Header.Set("X-Medina-Profile", profile)
+	courseRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(courseRec, courseReq)
+	var agg struct {
+		Lessons        map[string]any `json:"lessons"`
+		CompletedCount int            `json:"completedCount"`
+		TotalCount     int            `json:"totalCount"`
+	}
+	if err := json.Unmarshal(courseRec.Body.Bytes(), &agg); err != nil {
+		t.Fatal(err)
+	}
+	if agg.TotalCount != 2 {
+		t.Fatalf("expected totalCount=2, got %d", agg.TotalCount)
+	}
+	if agg.CompletedCount != 1 {
+		t.Fatalf("expected completedCount=1, got %d", agg.CompletedCount)
+	}
+	if _, ok := agg.Lessons[lessonA]; !ok {
+		t.Fatal("aggregation missing the completed lesson")
 	}
 }

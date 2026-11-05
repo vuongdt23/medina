@@ -457,3 +457,74 @@ func (s *Store) itemsWhere(ctx context.Context, libraryID, filter string, args [
 	}
 	return out, rows.Err()
 }
+
+// LessonProgress is a per-profile playback record for a single lesson item.
+// Progress is keyed by (library, profile, item); the server is single-tenant
+// and has no accounts, so the client supplies an opaque profile identifier.
+type LessonProgress struct {
+	ItemID          string    `json:"itemId"`
+	PositionSeconds float64   `json:"positionSeconds"`
+	DurationSeconds float64   `json:"durationSeconds"`
+	Completed       bool      `json:"completed"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+// UpsertLessonProgress stores or replaces the progress record for one lesson.
+// The item must already exist in the stable items table (FK enforced).
+func (s *Store) UpsertLessonProgress(ctx context.Context, libraryID, profileID string, p LessonProgress) error {
+	if p.UpdatedAt.IsZero() {
+		p.UpdatedAt = time.Now().UTC()
+	}
+	completed := 0
+	if p.Completed {
+		completed = 1
+	}
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO lesson_progress(library_id,profile_id,item_id,position_seconds,duration_seconds,completed,updated_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(library_id,profile_id,item_id) DO UPDATE SET position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,completed=excluded.completed,updated_at=excluded.updated_at`,
+		libraryID, profileID, p.ItemID, p.PositionSeconds, p.DurationSeconds, completed, p.UpdatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+// LessonProgressFor returns the record for one lesson, or ok=false when the
+// profile has no stored progress for it.
+func (s *Store) LessonProgressFor(ctx context.Context, libraryID, profileID, itemID string) (LessonProgress, bool, error) {
+	var p LessonProgress
+	var completed int
+	var updated string
+	err := s.DB.QueryRowContext(ctx, `SELECT item_id,position_seconds,duration_seconds,completed,updated_at FROM lesson_progress WHERE library_id=? AND profile_id=? AND item_id=?`, libraryID, profileID, itemID).
+		Scan(&p.ItemID, &p.PositionSeconds, &p.DurationSeconds, &completed, &updated)
+	if err == sql.ErrNoRows {
+		return LessonProgress{}, false, nil
+	}
+	if err != nil {
+		return LessonProgress{}, false, err
+	}
+	p.Completed = completed != 0
+	p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return p, true, nil
+}
+
+// AllLessonProgress returns every progress record for a profile in the library.
+// Course scoping (restricting to a single course's lessons) is applied by the
+// caller, which owns the course/lesson tree structure.
+func (s *Store) AllLessonProgress(ctx context.Context, libraryID, profileID string) ([]LessonProgress, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT item_id,position_seconds,duration_seconds,completed,updated_at FROM lesson_progress WHERE library_id=? AND profile_id=?`, libraryID, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LessonProgress
+	for rows.Next() {
+		var p LessonProgress
+		var completed int
+		var updated string
+		if err = rows.Scan(&p.ItemID, &p.PositionSeconds, &p.DurationSeconds, &completed, &updated); err != nil {
+			return nil, err
+		}
+		p.Completed = completed != 0
+		p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

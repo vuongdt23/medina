@@ -32,6 +32,60 @@ public struct Library: Codable, Identifiable, Hashable, Sendable {
     public let name: String
 }
 
+/// Per-profile playback progress for a single lesson, as stored by the server.
+public struct LessonProgress: Codable, Hashable, Sendable {
+    public var itemId: String
+    public var positionSeconds: Double
+    public var durationSeconds: Double
+    public var completed: Bool
+    public var updatedAt: String?
+
+    public init(itemId: String, positionSeconds: Double = 0, durationSeconds: Double = 0,
+                completed: Bool = false, updatedAt: String? = nil) {
+        self.itemId = itemId
+        self.positionSeconds = positionSeconds
+        self.durationSeconds = durationSeconds
+        self.completed = completed
+        self.updatedAt = updatedAt
+    }
+
+    /// Fraction watched in `0...1`, clamped; zero when the duration is unknown.
+    public var fraction: Double {
+        guard durationSeconds > 0 else { return completed ? 1 : 0 }
+        return min(1, max(0, positionSeconds / durationSeconds))
+    }
+
+    /// A lesson counts as finished when the server marked it complete or the
+    /// viewer reached the last stretch of a lesson with a known duration.
+    public var isEffectivelyComplete: Bool {
+        completed || (durationSeconds > 0 && positionSeconds / durationSeconds >= 0.9)
+    }
+}
+
+/// Aggregate course progress: a record per lesson that has any progress, plus
+/// completion counts spanning every lesson in the course (including untouched).
+public struct CourseProgress: Codable, Hashable, Sendable {
+    public var lessons: [String: LessonProgress]
+    public var completedCount: Int
+    public var totalCount: Int
+
+    public init(lessons: [String: LessonProgress] = [:], completedCount: Int = 0, totalCount: Int = 0) {
+        self.lessons = lessons
+        self.completedCount = completedCount
+        self.totalCount = totalCount
+    }
+
+    public static let empty = CourseProgress()
+
+    /// Completion fraction of the whole course in `0...1`.
+    public var fraction: Double {
+        guard totalCount > 0 else { return 0 }
+        return min(1, max(0, Double(completedCount) / Double(totalCount)))
+    }
+
+    public func progress(for lessonID: String) -> LessonProgress? { lessons[lessonID] }
+}
+
 public struct IndexStatus: Decodable, Sendable {
     public var libraryId: String?
     public var state: String?
@@ -141,6 +195,25 @@ public enum CourseTree {
         }
         visit(root, depth: 0)
         return result
+    }
+
+    /// The lesson to resume: the most recently updated lesson that is not yet
+    /// effectively complete. Falls back to the first lesson when everything is
+    /// complete. Returns nil only for a course with no lessons.
+    public static func resumeTarget(in root: TreeNode, progress: CourseProgress) -> TreeNode? {
+        let ordered = lessons(in: root)
+        guard !ordered.isEmpty else { return nil }
+        let incomplete = ordered.filter { !(progress.progress(for: $0.id)?.isEffectivelyComplete ?? false) }
+        if incomplete.isEmpty { return ordered.first }
+        // Prefer the most recently touched incomplete lesson; updatedAt is an
+        // ISO-8601 string, so lexical ordering matches chronological ordering.
+        let touched = incomplete
+            .compactMap { lesson -> (TreeNode, String)? in
+                guard let stamp = progress.progress(for: lesson.id)?.updatedAt else { return nil }
+                return (lesson, stamp)
+            }
+            .max { $0.1 < $1.1 }
+        return touched?.0 ?? incomplete.first
     }
 
     /// During initial enumeration, canonical sections can temporarily move from
@@ -291,8 +364,77 @@ public final class MedinaAPIClient: Sendable {
         try await get("/api/v1/courses/\(pathSegment(courseID))/tree")
     }
 
+    /// Reads aggregate course progress for a client profile. Progress is
+    /// scoped by the opaque `X-Medina-Profile` identifier; the server has no
+    /// accounts and treats each profile independently.
+    public func courseProgress(courseID: String, profileID: String) async throws -> CourseProgress {
+        var request = URLRequest(url: endpoint("/api/v1/courses/\(pathSegment(courseID))/progress"))
+        request.timeoutInterval = 10
+        request.setValue(profileID, forHTTPHeaderField: "X-Medina-Profile")
+        return try await send(request)
+    }
+
+    /// Stores playback progress for a lesson and returns the persisted record.
+    @discardableResult
+    public func putLessonProgress(id: String, profileID: String, _ body: LessonProgress) async throws -> LessonProgress {
+        var request = URLRequest(url: endpoint("/api/v1/lessons/\(pathSegment(id))/progress"))
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 10
+        request.setValue(profileID, forHTTPHeaderField: "X-Medina-Profile")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Payload: Encodable { var positionSeconds: Double; var durationSeconds: Double; var completed: Bool }
+        request.httpBody = try JSONEncoder().encode(Payload(positionSeconds: body.positionSeconds,
+                                                            durationSeconds: body.durationSeconds,
+                                                            completed: body.completed))
+        return try await send(request)
+    }
+
     public func resolve(_ serverPath: String) -> URL {
         URL(string: serverPath, relativeTo: profile.origin)!.absoluteURL
+    }
+
+    public func assetPreviewURL(id: String) -> URL {
+        endpoint("/api/v1/assets/\(pathSegment(id))/preview")
+    }
+
+    public func assetDownloadURL(id: String) -> URL {
+        endpoint("/api/v1/assets/\(pathSegment(id))/download")
+    }
+
+    public func assetArchiveURL(id: String) -> URL {
+        endpoint("/api/v1/assets/\(pathSegment(id))/archive.zip")
+    }
+
+    public func previewAsset(id: String) async throws -> Data {
+        var request = URLRequest(url: assetPreviewURL(id: id))
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MedinaAPIError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else { throw httpStatusError(http.statusCode, data: data) }
+        return data
+    }
+
+    /// Streams an asset or archive to a user-selected URL without holding the
+    /// complete download in memory.
+    public func download(from url: URL, to destination: URL) async throws {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 120
+        let (temporaryURL, response) = try await session.download(for: request)
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+        guard let http = response as? HTTPURLResponse else { throw MedinaAPIError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let data = (try? Data(contentsOf: temporaryURL)) ?? Data()
+            throw httpStatusError(http.statusCode, data: data)
+        }
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
+        try fileManager.copyItem(at: temporaryURL, to: destination)
+    }
+
+    private func httpStatusError(_ status: Int, data: Data) -> MedinaAPIError {
+        let envelope = try? decoder.decode(APIErrorEnvelope.self, from: data)
+        let message = envelope?.error?.message ?? String(data: data.prefix(2048), encoding: .utf8) ?? "Request failed"
+        return .httpStatus(status, message)
     }
 
     public func startScan() async throws {
@@ -309,12 +451,15 @@ public final class MedinaAPIClient: Sendable {
 
     private func request<T: Decodable>(_ url: URL) async throws -> T {
         var request = URLRequest(url: url); request.timeoutInterval = 10
+        return try await send(request)
+    }
+
+    /// Performs a prepared request and decodes the JSON body, applying the
+    /// shared status-code and decoding-error handling used across the client.
+    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw MedinaAPIError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let envelope = try? decoder.decode(APIErrorEnvelope.self, from: data)
-            throw MedinaAPIError.httpStatus(http.statusCode, envelope?.error?.message ?? String(data: data.prefix(2048), encoding: .utf8) ?? "Request failed")
-        }
+        guard (200..<300).contains(http.statusCode) else { throw httpStatusError(http.statusCode, data: data) }
         do { return try decoder.decode(T.self, from: data) }
         catch { throw MedinaAPIError.invalidResponse }
     }

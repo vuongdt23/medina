@@ -54,9 +54,58 @@ final class MedinaCoreTests: XCTestCase {
         XCTAssertEqual(queue.current?.id, "one")
     }
 
+    func testAssetURLsUseTheConfiguredOriginAndEncodeIDs() {
+        let profile = ServerProfile(origin: URL(string: "http://medina.local:17843")!)
+        let client = MedinaAPIClient(profile: profile)
+        XCTAssertEqual(client.assetPreviewURL(id: "file/one").absoluteString,
+                       "http://medina.local:17843/api/v1/assets/file%2Fone/preview")
+        XCTAssertEqual(client.assetDownloadURL(id: "asset-id").path,
+                       "/api/v1/assets/asset-id/download")
+        XCTAssertEqual(client.assetArchiveURL(id: "folder-id").path,
+                       "/api/v1/assets/folder-id/archive.zip")
+    }
+
     func testOriginNormalizationRejectsPathAndCredentials() throws {
         XCTAssertEqual(try ServerProfile.normalizedOrigin("http://localhost:17843/").absoluteString, "http://localhost:17843")
         XCTAssertThrowsError(try ServerProfile.normalizedOrigin("http://localhost:17843/prefix"))
         XCTAssertThrowsError(try ServerProfile.normalizedOrigin("http://user:pass@localhost:17843"))
+    }
+
+    func testLessonProgressFractionAndCompletionRule() {
+        var p = LessonProgress(itemId: "a", positionSeconds: 45, durationSeconds: 100)
+        XCTAssertEqual(p.fraction, 0.45, accuracy: 0.0001)
+        XCTAssertFalse(p.isEffectivelyComplete)
+        p.positionSeconds = 95
+        XCTAssertTrue(p.isEffectivelyComplete, "reaching the last 10% counts as complete")
+        let flagged = LessonProgress(itemId: "b", positionSeconds: 1, durationSeconds: 0, completed: true)
+        XCTAssertTrue(flagged.isEffectivelyComplete, "explicit completion wins without a duration")
+        XCTAssertEqual(flagged.fraction, 1)
+    }
+
+    func testCourseProgressFraction() {
+        XCTAssertEqual(CourseProgress.empty.fraction, 0)
+        XCTAssertEqual(CourseProgress(lessons: [:], completedCount: 9, totalCount: 12).fraction, 0.75, accuracy: 0.0001)
+    }
+
+    func testResumeTargetPrefersMostRecentIncompleteLesson() {
+        let one = TreeNode(id: "one", type: "lesson", title: "One", position: 0)
+        let two = TreeNode(id: "two", type: "lesson", title: "Two", position: 1)
+        let three = TreeNode(id: "three", type: "lesson", title: "Three", position: 2)
+        let root = TreeNode(id: "course", type: "course", title: "Course", lessons: [one, two, three])
+        let progress = CourseProgress(lessons: [
+            "one": LessonProgress(itemId: "one", positionSeconds: 100, durationSeconds: 100, completed: true, updatedAt: "2026-01-01T00:00:00Z"),
+            "two": LessonProgress(itemId: "two", positionSeconds: 20, durationSeconds: 100, updatedAt: "2026-02-01T00:00:00Z"),
+        ], completedCount: 1, totalCount: 3)
+        XCTAssertEqual(CourseTree.resumeTarget(in: root, progress: progress)?.id, "two",
+                       "the most recently touched incomplete lesson resumes")
+
+        let allDone = CourseProgress(lessons: [
+            "one": LessonProgress(itemId: "one", completed: true),
+            "two": LessonProgress(itemId: "two", completed: true),
+            "three": LessonProgress(itemId: "three", completed: true),
+        ], completedCount: 3, totalCount: 3)
+        XCTAssertEqual(CourseTree.resumeTarget(in: root, progress: allDone)?.id, "one",
+                       "a finished course resumes at the first lesson")
+        XCTAssertNil(CourseTree.resumeTarget(in: TreeNode(id: "empty", type: "course", title: "Empty"), progress: .empty))
     }
 }

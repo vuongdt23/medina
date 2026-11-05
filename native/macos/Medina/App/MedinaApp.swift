@@ -1,4 +1,3 @@
-import AVKit
 import SwiftUI
 import MedinaCore
 import MedinaPlayback
@@ -33,6 +32,15 @@ final class LibraryModel {
     var playbackEngine: AVPlaybackEngine?
     var lessonQueue: LessonQueue?
     var isWorking = false
+    var courseProgress: CourseProgress = .empty
+    var progressEnabled = false
+    var courseSearch = ""
+    /// Which top-level screen is showing. The library grid is the anchor;
+    /// opening a card pushes into a focused course workspace.
+    enum Screen: Equatable { case library; case course(String) }
+    var route: Screen = .library
+    private var lastReportedAt: Date = .distantPast
+    private var lastReportedLessonID: String?
     private var profileID: UUID = {
         let key = "medinaProfileID"
         if let raw = UserDefaults.standard.string(forKey: key), let id = UUID(uuidString: raw) { return id }
@@ -41,6 +49,8 @@ final class LibraryModel {
         return id
     }()
     private var client: MedinaAPIClient?
+    var currentClient: MedinaAPIClient? { client }
+    var profileIdentifier: String { profileID.uuidString }
     private var cache: LibraryCache?
     private var treeRequestToken = UUID()
     private var connectionToken = UUID()
@@ -72,6 +82,7 @@ final class LibraryModel {
             guard connectionToken == token else { return }
             info = try await api.systemInfo()
             guard connectionToken == token else { return }
+            progressEnabled = info?.capabilities?["progress"] == true
             libraries = try await api.libraries()
             guard connectionToken == token else { return }
             guard let library = libraries.first else { throw MedinaAPIError.noLibrary }
@@ -84,7 +95,10 @@ final class LibraryModel {
             errorMessage = nil
             showConnectionSheet = false
             persistCache()
-            if let selectedCourseID { await loadTree(courseID: selectedCourseID, token: treeRequestToken) }
+            if let selectedCourseID {
+                await loadTree(courseID: selectedCourseID, token: treeRequestToken)
+                await loadProgress(courseID: selectedCourseID)
+            }
         } catch {
             guard connectionToken == token else { return }
             connectionMessage = "Connection failed"
@@ -108,36 +122,107 @@ final class LibraryModel {
             playbackEngine = engine
         }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
+        lastReportedLessonID = nil
+        lastReportedAt = .distantPast
+    }
+
+    /// Plays a lesson identified by id within the current tree (used by Resume
+    /// and the outline rows). No-op when the id is not a playable lesson.
+    func playLesson(id: String) {
+        guard let tree, let lesson = CourseTree.lessons(in: tree).first(where: { $0.id == id }) else { return }
+        playLesson(lesson)
+    }
+
+    /// The lesson the "Continue" affordance should start, if any.
+    var resumeTarget: TreeNode? {
+        guard let tree else { return nil }
+        return CourseTree.resumeTarget(in: tree, progress: courseProgress)
     }
 
     func playNext() {
+        reportPlaybackProgress(force: true)
         guard var queue = lessonQueue, let lesson = queue.moveNext() else { return }
         lessonQueue = queue
         loadQueuedLesson(lesson)
     }
 
     func playPrevious() {
+        reportPlaybackProgress(force: true)
         guard var queue = lessonQueue, let lesson = queue.movePrevious() else { return }
         lessonQueue = queue
         loadQueuedLesson(lesson)
     }
 
     func stopPlayback() {
+        reportPlaybackProgress(force: true)
         playbackEngine?.shutdown()
         playbackEngine = nil
         lessonQueue = nil
     }
 
     private func advanceAfterNaturalEnd() {
+        // A lesson that played to its end is complete regardless of the
+        // position the player last reported.
+        markCurrentLessonComplete()
         guard var queue = lessonQueue, let current = queue.current,
               let next = queue.naturalEOF(for: current.id, autoplay: true) else { return }
         lessonQueue = queue
         loadQueuedLesson(next)
     }
 
+    /// Reports the active lesson's position to the server, throttled to roughly
+    /// once every 5 seconds unless `force` (stop, track change) is set.
+    func reportPlaybackProgress(force: Bool = false) {
+        guard progressEnabled, let client, let engine = playbackEngine,
+              let lesson = lessonQueue?.current else { return }
+        let now = Date()
+        let switched = lastReportedLessonID != lesson.id
+        guard force || switched || now.timeIntervalSince(lastReportedAt) >= 5 else { return }
+        lastReportedAt = now
+        lastReportedLessonID = lesson.id
+        let position = engine.currentTime
+        let duration = engine.duration
+        let complete = duration > 0 && position / duration >= 0.9
+        var record = LessonProgress(itemId: lesson.id, positionSeconds: position,
+                                    durationSeconds: duration, completed: complete)
+        updateLocalProgress(record)
+        Task { [profileIdentifier] in
+            if let stored = try? await client.putLessonProgress(id: lesson.id, profileID: profileIdentifier, record) {
+                record = stored
+            }
+        }
+    }
+
+    private func markCurrentLessonComplete() {
+        guard progressEnabled, let client, let lesson = lessonQueue?.current else { return }
+        let duration = playbackEngine?.duration ?? 0
+        let record = LessonProgress(itemId: lesson.id, positionSeconds: duration,
+                                    durationSeconds: duration, completed: true)
+        updateLocalProgress(record)
+        lastReportedLessonID = lesson.id
+        Task { [profileIdentifier] in
+            _ = try? await client.putLessonProgress(id: lesson.id, profileID: profileIdentifier, record)
+        }
+    }
+
+    /// Optimistically folds a new record into the in-memory course progress so
+    /// the outline and sidebar update immediately, before the server round-trip.
+    private func updateLocalProgress(_ record: LessonProgress) {
+        var next = courseProgress
+        let wasComplete = next.lessons[record.itemId]?.isEffectivelyComplete ?? false
+        next.lessons[record.itemId] = record
+        if record.isEffectivelyComplete && !wasComplete {
+            next.completedCount = min(next.totalCount == 0 ? next.completedCount + 1 : next.totalCount,
+                                      next.completedCount + 1)
+        }
+        courseProgress = next
+    }
+
     private func loadQueuedLesson(_ lesson: TreeNode) {
         guard let client, let stream = lesson.streamUrl else { return }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
+        lastReportedLessonID = nil
+        lastReportedAt = .distantPast
     }
 
     func selectCourse(_ course: Course) async {
@@ -146,11 +231,40 @@ final class LibraryModel {
         selectedCourseID = course.id
         UserDefaults.standard.set(course.id, forKey: "selectedCourseID")
         selectedItemID = nil
+        courseProgress = .empty
         guard client != nil else {
             if let cached = cache?.load() { tree = cached.trees[course.id] }
             return
         }
         await loadTree(courseID: course.id, token: token)
+        await loadProgress(courseID: course.id)
+    }
+
+    /// Pushes into the course focus screen and loads its content. Reuses
+    /// selectCourse so tree + progress are fetched exactly as before.
+    func openCourse(_ course: Course) async {
+        route = .course(course.id)
+        await selectCourse(course)
+    }
+
+    /// Returns to the library grid. Playback intentionally keeps running so a
+    /// lesson is not interrupted by browsing; tree/selection are retained for
+    /// instant re-entry.
+    func backToLibrary() {
+        route = .library
+    }
+
+    /// Fetches aggregate course progress for the active profile. Progress is a
+    /// best-effort overlay; failures never block browsing or playback.
+    func loadProgress(courseID: String) async {
+        guard progressEnabled, let client else { return }
+        do {
+            let incoming = try await client.courseProgress(courseID: courseID, profileID: profileIdentifier)
+            guard selectedCourseID == courseID else { return }
+            courseProgress = incoming
+        } catch {
+            // Keep whatever we had; progress is non-essential.
+        }
     }
 
     private func loadTree(courseID: String, token: UUID) async {
@@ -201,45 +315,33 @@ final class LibraryModel {
 
 struct LibraryWindow: View {
     @State private var model = LibraryModel()
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 0) {
-                HStack {
-                    Label(model.connectionMessage, systemImage: model.errorMessage == nil ? "network" : "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Server…") { model.showConnectionSheet = true }
-                    Button { Task { await model.rescan() } } label: { Image(systemName: "arrow.clockwise") }
-                        .help("Rescan library")
-                }.padding(.horizontal, 12).padding(.bottom, 8)
-                List(model.courses, selection: Binding(get: { model.selectedCourseID }, set: { id in
-                    guard let item = model.courses.first(where: { $0.id == id }) else { return }
-                    Task { await model.selectCourse(item) }
-                })) { course in
-                    Text(course.title).tag(course.id as String?)
-                }
-                if let status = model.status {
-                    HStack {
-                        Text(status.state ?? "unknown")
-                        if status.state == "scanning" { ProgressView().controlSize(.small) }
-                        Spacer()
-                        Text("\(status.itemCount ?? 0) indexed")
-                    }.font(.caption).foregroundStyle(.secondary).padding(10)
-                }
+        ZStack {
+            Theme.canvas(scheme).ignoresSafeArea()
+            switch model.route {
+            case .library:
+                LibraryHome(model: model)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .leading).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)))
+            case .course:
+                CourseFocus(model: model)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .trailing).combined(with: .opacity)))
             }
-            .navigationTitle(model.libraries.first?.name ?? "Library")
-            .task {
-                if !model.showConnectionSheet { await model.connect() }
+        }
+        .animation(.easeInOut(duration: 0.32), value: model.route)
+        .task {
+            if !model.showConnectionSheet { await model.connect() }
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(model.status?.state == "scanning" ? 1 : 10))
+                await model.refresh()
             }
-            .task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(model.status?.state == "scanning" ? 1 : 10))
-                    await model.refresh()
-                }
-            }
-        } detail: {
-            detail
         }
         .sheet(isPresented: $model.showConnectionSheet) {
             ConnectionSetupView(model: model)
@@ -248,42 +350,6 @@ struct LibraryWindow: View {
         .alert("Medina", isPresented: Binding(get: { model.errorMessage != nil && !model.showConnectionSheet }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
-    }
-
-    @ViewBuilder private var detail: some View {
-        if let tree = model.tree {
-            HSplitView {
-                List(CourseTree.outline(of: tree), selection: $model.selectedItemID) { entry in
-                    OutlineRow(entry: entry)
-                        .tag(entry.id as String?)
-                }
-                .frame(minWidth: 300)
-                VStack(spacing: 0) {
-                    if let entry = CourseTree.outline(of: tree).first(where: { $0.id == model.selectedItemID }) {
-                        ItemDetails(item: entry.item) { lesson in model.playLesson(lesson) }
-                    } else {
-                        ContentUnavailableView("Choose a lesson or file", systemImage: "rectangle.split.3x1")
-                    }
-                    if let engine = model.playbackEngine {
-                        Divider()
-                        PlaybackPanel(
-                            engine: engine,
-                            lessonTitle: model.lessonQueue?.current?.title ?? engine.title,
-                            hasPrevious: model.lessonQueue?.previous != nil,
-                            hasNext: model.lessonQueue?.next != nil,
-                            onPrevious: { model.playPrevious() },
-                            onNext: { model.playNext() },
-                            onStop: { model.stopPlayback() }
-                        )
-                    }
-                }
-                .frame(minWidth: 340)
-            }
-            .navigationTitle(tree.title)
-        } else {
-            ContentUnavailableView("Connect to a Medina server", systemImage: "server.rack",
-                                   description: Text("Enter the address of your self-hosted Medina server."))
-        }
     }
 }
 
@@ -351,120 +417,5 @@ struct ConnectionSetupView: View {
     private func capabilitySummary(_ capabilities: [String: Bool]) -> String {
         let supported = capabilities.filter(\.value).keys.sorted()
         return supported.isEmpty ? "No optional capabilities reported" : "Available: " + supported.joined(separator: ", ")
-    }
-}
-
-struct OutlineRow: View {
-    let entry: OutlineEntry
-    var body: some View {
-        Label {
-            Text(entry.item.title).lineLimit(1)
-        } icon: {
-            Image(systemName: icon).foregroundStyle(entry.item.type == "lesson" ? .primary : .secondary)
-        }
-        .padding(.leading, CGFloat(entry.depth) * 12)
-        .help(entry.item.originalName ?? entry.item.title)
-    }
-    private var icon: String {
-        switch entry.item.type {
-        case "lesson": return entry.item.mediaKind == "audio" ? "music.note" : "play.rectangle"
-        case "section": return "folder"
-        case "asset_directory": return "folder"
-        case "subtitle": return "captions.bubble"
-        default: return "doc"
-        }
-    }
-}
-
-struct PlaybackPanel: View {
-    let engine: AVPlaybackEngine
-    let lessonTitle: String
-    let hasPrevious: Bool
-    let hasNext: Bool
-    let onPrevious: () -> Void
-    let onNext: () -> Void
-    let onStop: () -> Void
-
-    var body: some View {
-        VStack(spacing: 8) {
-            NativeAVPlayerView(player: engine.player)
-                .frame(minHeight: 210, idealHeight: 260)
-                .accessibilityLabel("Video player: \(lessonTitle)")
-            HStack(spacing: 12) {
-                Button(action: onPrevious) { Image(systemName: "backward.end.fill") }
-                    .disabled(!hasPrevious).help("Previous lesson")
-                Text(lessonTitle).font(.headline).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                if !engine.audioOptions.isEmpty {
-                    Menu("Audio") {
-                        ForEach(Array(engine.audioOptions.enumerated()), id: \.offset) { index, title in
-                            Button(title) { engine.selectAudioTrack(index) }
-                        }
-                    }
-                }
-                if !engine.subtitleOptions.isEmpty {
-                    Menu("Subtitles") {
-                        Button("Off") { engine.selectSubtitleTrack(nil) }
-                        ForEach(Array(engine.subtitleOptions.enumerated()), id: \.offset) { index, title in
-                            Button(title) { engine.selectSubtitleTrack(index) }
-                        }
-                    }
-                }
-                Menu("Speed") {
-                    ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                        Button("\(speed, format: .number)×") { engine.setSpeed(Float(speed)) }
-                    }
-                }
-                Button(action: onNext) { Image(systemName: "forward.end.fill") }
-                    .disabled(!hasNext).help("Next lesson")
-                Button(action: onStop) { Image(systemName: "xmark") }
-                    .help("Stop playback")
-            }
-            if case .failed(let message) = engine.state {
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding(12)
-    }
-}
-
-struct NativeAVPlayerView: NSViewRepresentable {
-    let player: AVPlayer
-
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.player = player
-        view.controlsStyle = .inline
-        view.videoGravity = AVLayerVideoGravity.resizeAspect
-        return view
-    }
-
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        if view.player !== player { view.player = player }
-    }
-}
-
-struct ItemDetails: View {
-    let item: TreeNode
-    var onPlay: (TreeNode) -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(item.type.replacingOccurrences(of: "_", with: " ").capitalized, systemImage: item.type == "lesson" ? "play.rectangle" : "doc")
-                .font(.caption).foregroundStyle(.secondary)
-            Text(item.title).font(.title2).bold()
-            if let name = item.originalName { Text(name).font(.callout).foregroundStyle(.secondary) }
-            if let size = item.sizeBytes { Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)).font(.caption) }
-            if item.type == "lesson" {
-                Button {
-                    onPlay(item)
-                } label: {
-                    Label("Play from beginning", systemImage: "play.fill")
-                }
-                .buttonStyle(.borderedProminent)
-            } else if let url = item.contentUrl {
-                Text(url).font(.caption.monospaced()).textSelection(.enabled)
-            }
-            Spacer()
-        }.padding(24).frame(minWidth: 320, maxWidth: .infinity, alignment: .leading)
     }
 }

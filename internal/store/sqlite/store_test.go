@@ -108,3 +108,66 @@ func TestScanPublishesGenerationAndKeepsPreviousOnFailure(t *testing.T) {
 		t.Fatalf("unexpected scan state: %v", status["state"])
 	}
 }
+
+func TestLessonProgressUpsertIsIdempotentAndProfileScoped(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	course := filepath.Join(root, "Course")
+	if err := os.MkdirAll(course, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "lesson.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "progress-store.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.EnsureLibrary(ctx, "library_default", "Test", root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Scan(ctx, "library_default", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Items(ctx, "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lessonID string
+	for _, it := range items {
+		if it.Type == "lesson" {
+			lessonID = it.ID
+		}
+	}
+	if lessonID == "" {
+		t.Fatal("lesson not indexed")
+	}
+
+	if err := store.UpsertLessonProgress(ctx, "library_default", "p1", LessonProgress{ItemID: lessonID, PositionSeconds: 10}); err != nil {
+		t.Fatal(err)
+	}
+	// A second upsert replaces rather than duplicating.
+	if err := store.UpsertLessonProgress(ctx, "library_default", "p1", LessonProgress{ItemID: lessonID, PositionSeconds: 55, Completed: true}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.AllLessonProgress(ctx, "library_default", "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 row after repeated upsert, got %d", len(all))
+	}
+	rec, ok, err := store.LessonProgressFor(ctx, "library_default", "p1", lessonID)
+	if err != nil || !ok {
+		t.Fatalf("expected stored record, ok=%v err=%v", ok, err)
+	}
+	if rec.PositionSeconds != 55 || !rec.Completed {
+		t.Fatalf("upsert did not replace values: %+v", rec)
+	}
+
+	// A different profile is isolated.
+	if _, ok, err := store.LessonProgressFor(ctx, "library_default", "p2", lessonID); err != nil || ok {
+		t.Fatalf("expected no record for p2, ok=%v err=%v", ok, err)
+	}
+}

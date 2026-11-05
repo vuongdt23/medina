@@ -82,6 +82,83 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: Recursive course tree }
+  /courses/{courseID}/progress:
+    get:
+      summary: Aggregate lesson progress for a course
+      description: Per-profile playback progress for every lesson beneath the course. Requires an X-Medina-Profile header identifying the client; the server has no user accounts.
+      parameters:
+        - in: path
+          name: courseID
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-Medina-Profile
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Course progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lessons:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        itemId: { type: string }
+                        positionSeconds: { type: number }
+                        durationSeconds: { type: number }
+                        completed: { type: boolean }
+                        updatedAt: { type: string, format: date-time }
+                  completedCount: { type: integer }
+                  totalCount: { type: integer }
+        '400': { description: Missing X-Medina-Profile header }
+        '404': { description: Course not found }
+  /lessons/{itemID}/progress:
+    get:
+      summary: Read playback progress for one lesson
+      description: Returns the stored record for the profile, or a zero-value record when none exists. Requires an X-Medina-Profile header.
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-Medina-Profile
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Lesson progress record }
+        '400': { description: Missing X-Medina-Profile header }
+    put:
+      summary: Store playback progress for one lesson
+      description: Upserts the per-profile progress record. Duration is reported by the client (the API does not probe media). Requires an X-Medina-Profile header.
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-Medina-Profile
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                positionSeconds: { type: number }
+                durationSeconds: { type: number }
+                completed: { type: boolean }
+      responses:
+        '200': { description: Stored progress record }
+        '400': { description: Missing header or invalid body }
+        '404': { description: Lesson not found }
   /lessons/{itemID}/content:
     get:
       parameters:

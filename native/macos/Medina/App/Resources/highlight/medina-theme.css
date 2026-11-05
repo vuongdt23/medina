@@ -1,0 +1,90 @@
+/* Medina code viewer — warm editorial theme, light + dark via prefers-color-scheme.
+   Palette mirrors the native DesignSystem: paper/ink neutrals, one amber accent. */
+
+:root {
+  --paper: #faf9f5;
+  --ink: #2b2723;
+  --muted: #8a8278;
+  --hairline: rgba(0,0,0,0.08);
+  --accent: #e5851f;
+  --gutter-bg: #f1efe8;
+  --kw: #c2410c;      /* keyword — terracotta */
+  --str: #4d7c3f;     /* string — olive green */
+  --num: #b45309;     /* number — amber brown */
+  --comment: #a79d8f; /* comment — warm grey */
+  --type: #9a6b00;    /* type/title — deep amber */
+  --fn: #b45309;
+  --lit: #a3561a;
+  --meta: #97908a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1a1816;
+    --ink: #e9e3da;
+    --muted: #8a8278;
+    --hairline: rgba(255,255,255,0.09);
+    --accent: #f0a04a;
+    --gutter-bg: #211e1b;
+    --kw: #f0a35e;
+    --str: #9fc088;
+    --num: #e0a86a;
+    --comment: #6f675d;
+    --type: #e8c07d;
+    --fn: #e0a86a;
+    --lit: #e8a765;
+    --meta: #7a736a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.6 ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  display: flex;
+  min-height: 100%;
+}
+
+.gutter {
+  user-select: none;
+  text-align: right;
+  padding: 16px 12px 16px 16px;
+  color: var(--muted);
+  background: var(--gutter-bg);
+  border-right: 1px solid var(--hairline);
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+}
+
+pre {
+  margin: 0;
+  padding: 16px 20px;
+  overflow-x: auto;
+  flex: 1;
+}
+
+code { white-space: pre; }
+
+/* highlight.js token mapping */
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-name { color: var(--kw); }
+.hljs-string, .hljs-regexp, .hljs-attr, .hljs-symbol, .hljs-bullet { color: var(--str); }
+.hljs-number, .hljs-literal { color: var(--num); }
+.hljs-comment, .hljs-quote { color: var(--comment); font-style: italic; }
+.hljs-title, .hljs-class .hljs-title, .hljs-type, .hljs-title.class_ { color: var(--type); }
+.hljs-title.function_, .hljs-function .hljs-title { color: var(--fn); }
+.hljs-meta, .hljs-doctag { color: var(--meta); }
+.hljs-attribute, .hljs-variable, .hljs-template-variable { color: var(--ink); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+.hljs-section, .hljs-selector-id { color: var(--type); font-weight: 600; }
+
+/* Markdown rendered-ish fallback uses plaintext; keep it readable. */
+.plain { color: var(--ink); }
