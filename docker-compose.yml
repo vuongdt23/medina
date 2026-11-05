@@ -5,9 +5,9 @@ services:
       args:
         BUNDLE_FRONTEND: ${BUNDLE_FRONTEND:-true}
     ports:
-      - "127.0.0.1:${PORT:-8080}:8080"
+      - "127.0.0.1:${PORT:-17843}:17843"
     environment:
-      BIND_ADDRESS: ${BIND_ADDRESS:-0.0.0.0:8080}
+      BIND_ADDRESS: ${BIND_ADDRESS:-0.0.0.0:17843}
       CONTENT_ROOT: ${CONTENT_ROOT:-/library}
       DATABASE_PATH: ${DATABASE_PATH:-/data/course-media.sqlite}
       LIBRARY_NAME: ${LIBRARY_NAME:-Development Library}

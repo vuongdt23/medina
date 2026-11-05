@@ -4,6 +4,27 @@ import (
 	"testing"
 )
 
+func TestDefaultBindAddressAndOverride(t *testing.T) {
+	t.Setenv("CONTENT_ROOT", t.TempDir())
+	t.Setenv("BIND_ADDRESS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BindAddress != "127.0.0.1:17843" {
+		t.Fatalf("default bind address = %q", cfg.BindAddress)
+	}
+
+	t.Setenv("BIND_ADDRESS", "127.0.0.1:19001")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BindAddress != "127.0.0.1:19001" {
+		t.Fatalf("custom bind address = %q", cfg.BindAddress)
+	}
+}
+
 func TestScanSettings(t *testing.T) {
 	t.Setenv("CONTENT_ROOT", t.TempDir())
 	t.Setenv("SCAN_WORKERS", "8")

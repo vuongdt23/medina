@@ -25,7 +25,7 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		BindAddress:  env("BIND_ADDRESS", "127.0.0.1:8080"),
+		BindAddress:  env("BIND_ADDRESS", "127.0.0.1:17843"),
 		DatabasePath: env("DATABASE_PATH", "./data/course-media.sqlite"),
 		ContentRoot:  os.Getenv("CONTENT_ROOT"),
 		LibraryName:  env("LIBRARY_NAME", "Courses"),

@@ -37,10 +37,10 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /
 COPY --from=go-build /out/medina /medina
 COPY --from=go-build --chown=nonroot:nonroot /out/data /data
-ENV BIND_ADDRESS=0.0.0.0:8080 \
+ENV BIND_ADDRESS=0.0.0.0:17843 \
     CONTENT_ROOT=/library \
     DATABASE_PATH=/data/course-media.sqlite \
     LIBRARY_NAME="Development Library" \
     LOG_LEVEL=info
-EXPOSE 8080
+EXPOSE 17843
 ENTRYPOINT ["/medina"]

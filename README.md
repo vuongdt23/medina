@@ -11,7 +11,7 @@ cp .env.example .env
 docker compose up --build medina
 ```
 
-Open **http://127.0.0.1:8080**. The included sample library is mounted read-only. To use your own library, set `LIBRARY_MOUNT` in `.env`, or run:
+Open **http://127.0.0.1:17843**. The included sample library is mounted read-only. To use your own library, set `LIBRARY_MOUNT` in `.env`, or run:
 
 ```sh
 LIBRARY_MOUNT=/Volumes/Courses docker compose up --build medina
@@ -47,7 +47,7 @@ Use environment variables for local runs, or `.env` with Docker Compose.
 |---|---|---|
 | `CONTENT_ROOT` | required; `/library` in Docker | Library directory visible to the server |
 | `LIBRARY_MOUNT` | `./testdata` | Host library directory, Docker only |
-| `BIND_ADDRESS` | `127.0.0.1:8080` | Server listen address; Docker uses `0.0.0.0:8080` internally |
+| `BIND_ADDRESS` | `127.0.0.1:17843` | Server listen address; Docker uses `0.0.0.0:17843` internally |
 | `DATABASE_PATH` | `./data/course-media.sqlite` | Index location; Docker uses `/data/course-media.sqlite` |
 | `LIBRARY_NAME` | `Courses` | Display name |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
@@ -71,12 +71,12 @@ Medina scans at startup, watches for changes, and periodically reconciles the li
 ```sh
 make test       # Go tests
 make vet        # Go static checks
-make web-dev    # Vite UI; proxies API requests to localhost:8080
+make web-dev    # Vite UI; proxies API requests to localhost:17843
 ```
 
 Run the backend separately with `CONTENT_ROOT=/path/to/courses go run ./cmd/medina`. `make build` rebuilds the embedded UI and server. For a local API-only binary, use `go build -tags no_frontend -o bin/medina ./cmd/medina` (no Node build required).
 
-API documentation: **[/swagger/](http://127.0.0.1:8080/swagger/)**. The source specification is [`api/openapi.yaml`](api/openapi.yaml).
+API documentation: **[/swagger/](http://127.0.0.1:17843/swagger/)**. The source specification is [`api/openapi.yaml`](api/openapi.yaml).
 
 ### Optional logging stack
 
