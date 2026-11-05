@@ -96,7 +96,7 @@ struct ItemDetail: View {
             case "asset":
                 if supportsQuickLook {
                     Button { Task { await loadPreview() } } label: {
-                        Label("Quick Look", systemImage: "eye")
+                        Label("Open Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
                     }.disabled(isWorking || client == nil)
                 }
                 if let text = previewText {
@@ -202,12 +202,12 @@ struct ItemDetail: View {
         }
         return "Play from beginning"
     }
+    /// Quick Look is only offered where fullscreen adds something the inline
+    /// preview can't: images (zoom/pan at full resolution) and PDFs (full
+    /// reader). Code, Markdown, and web already render fully inline, so a
+    /// Quick Look button there is redundant.
     private var supportsQuickLook: Bool {
-        let ext = (item.fileExtension ?? "").trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
-        let mime = (item.mimeType ?? "").split(separator: ";", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
-        if ["html", "htm", "xhtml", "svg", "svgz"].contains(ext) { return false }
-        return mime == "application/pdf" || mime.hasPrefix("image/") || mime.hasPrefix("text/")
-            || CodeViewer.supports(extension: item.fileExtension, mimeType: item.mimeType)
+        kind == .image || kind == .pdf
     }
 
     /// Classifies an asset into the inline preview to render. Extension is the
