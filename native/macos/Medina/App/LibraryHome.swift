@@ -20,6 +20,7 @@ struct LibraryHome: View {
             Divider().overlay(Theme.hairline(scheme))
             grid
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.canvas(scheme))
     }
 
@@ -116,7 +117,9 @@ struct LibraryHome: View {
                     }
                 }
                 .padding(22)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

@@ -22,11 +22,18 @@ struct PlaybackPanel: View {
     var body: some View {
         VStack(spacing: 10) {
             NativeAVPlayerView(player: engine.player)
-                .frame(minHeight: 220, idealHeight: 280)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 200)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .accessibilityLabel("Video player: \(lessonTitle)")
 
+            // Lesson-level controls only. Scrubbing, play/pause, volume and
+            // fullscreen come from AVKit's native inline controls on the video.
             HStack(alignment: .center, spacing: 12) {
+                Button(action: onPrevious) { Image(systemName: "backward.end.fill") }
+                    .disabled(!hasPrevious).help("Previous lesson")
+                    .keyboardShortcut(.leftArrow, modifiers: .command)
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text(lessonTitle)
                         .font(Theme.display(14, .semibold)).lineLimit(1)
@@ -35,11 +42,8 @@ struct PlaybackPanel: View {
                             .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
-                Spacer()
-                transport
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 10) {
                 if !engine.audioOptions.isEmpty {
                     Menu("Audio") {
                         ForEach(Array(engine.audioOptions.enumerated()), id: \.offset) { index, title in
@@ -60,8 +64,15 @@ struct PlaybackPanel: View {
                         Button("\(speed, format: .number)×") { engine.setSpeed(Float(speed)) }
                     }
                 }.menuStyle(.borderlessButton).fixedSize()
-                Spacer()
+
+                Button(action: onNext) { Image(systemName: "forward.end.fill") }
+                    .disabled(!hasNext).help("Next lesson")
+                    .keyboardShortcut(.rightArrow, modifiers: .command)
+                Button(action: onStop) { Image(systemName: "xmark") }
+                    .help("Close player")
             }
+            .buttonStyle(.borderless)
+            .tint(Theme.accent)
             .font(.system(size: 12))
 
             if case .failed(let message) = engine.state {
@@ -71,30 +82,10 @@ struct PlaybackPanel: View {
             }
         }
         .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.card(scheme))
         .onReceive(ticker) { _ in onTick() }
         .onDisappear { onTick() }
-    }
-
-    private var transport: some View {
-        HStack(spacing: 14) {
-            Button(action: onPrevious) { Image(systemName: "backward.end.fill") }
-                .disabled(!hasPrevious).help("Previous lesson")
-                .keyboardShortcut(.leftArrow, modifiers: [])
-            Button { engine.togglePlayback() } label: {
-                Image(systemName: engine.state == .playing ? "pause.fill" : "play.fill")
-                    .font(.system(size: 18))
-            }
-            .help("Play/Pause")
-            .keyboardShortcut(.space, modifiers: [])
-            Button(action: onNext) { Image(systemName: "forward.end.fill") }
-                .disabled(!hasNext).help("Next lesson")
-                .keyboardShortcut(.rightArrow, modifiers: [])
-            Button(action: onStop) { Image(systemName: "xmark") }
-                .help("Stop playback")
-        }
-        .buttonStyle(.borderless)
-        .tint(Theme.accent)
     }
 }
 
@@ -105,6 +96,7 @@ struct NativeAVPlayerView: NSViewRepresentable {
         view.player = player
         view.controlsStyle = .inline
         view.videoGravity = .resizeAspect
+        view.showsFullScreenToggleButton = true
         return view
     }
     func updateNSView(_ view: AVPlayerView, context: Context) {

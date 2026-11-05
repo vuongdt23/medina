@@ -536,12 +536,41 @@ func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 	s.contentAs(w, r, item, true)
 }
 func isCodeExtension(ext string) bool {
-	switch ext {
-	case ".md", ".go", ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".sh", ".sql", ".css":
-		return true
-	}
-	return false
+	return codeExtensions[strings.ToLower(ext)]
 }
+
+// codeExtensions are text/source files the client can render inline with syntax
+// highlighting. Kept broad and in sync with the macOS client's CodeViewer so a
+// recognizable source file is never rejected just because the OS mime database
+// lacks an entry for it (e.g. .kt, .swift, .rb return no mime.TypeByExtension).
+var codeExtensions = map[string]bool{
+	".md": true, ".markdown": true, ".txt": true, ".log": true, ".text": true,
+	".go": true, ".rs": true, ".py": true, ".pyw": true, ".rb": true, ".php": true,
+	".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".ts": true, ".tsx": true,
+	".mts": true, ".cts": true, ".java": true, ".kt": true, ".kts": true, ".scala": true,
+	".swift": true, ".c": true, ".h": true, ".cc": true, ".cpp": true, ".cxx": true,
+	".hpp": true, ".hh": true, ".m": true, ".mm": true, ".cs": true, ".fs": true,
+	".lua": true, ".pl": true, ".pm": true, ".r": true, ".dart": true, ".groovy": true,
+	".gradle": true, ".clj": true, ".ex": true, ".exs": true, ".erl": true, ".hs": true,
+	".json": true, ".jsonc": true, ".yaml": true, ".yml": true, ".toml": true, ".ini": true,
+	".cfg": true, ".conf": true, ".properties": true, ".env": true, ".xml": true,
+	".csv": true, ".tsv": true, ".sh": true, ".bash": true, ".zsh": true, ".fish": true,
+	".ps1": true, ".psm1": true, ".bat": true, ".cmd": true, ".sql": true, ".css": true,
+	".scss": true, ".sass": true, ".less": true, ".graphql": true, ".gql": true,
+	".proto": true, ".tf": true, ".tfvars": true, ".hcl": true, ".dockerfile": true,
+	".gitignore": true, ".editorconfig": true,
+}
+
+// imageExtensions are raster/vector images the client can display inline. Used
+// alongside the mime check so images with a missing or octet-stream mime type
+// (the OS mime database is incomplete for .webp/.avif/.heic and others) still
+// preview. SVG is handled as an active document, not here.
+var imageExtensions = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+	".bmp": true, ".avif": true, ".tiff": true, ".tif": true, ".ico": true,
+	".heic": true, ".heif": true,
+}
+
 func mediaType(value string) string {
 	typ, _, err := mime.ParseMediaType(value)
 	if err != nil {
@@ -578,11 +607,8 @@ func previewable(mimeType, ext string) bool {
 	if typ == "application/pdf" || rasterImage(typ) || strings.HasPrefix(typ, "text/") {
 		return true
 	}
-	switch ext {
-	case ".md", ".go", ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".sh", ".sql", ".css":
-		return true
-	}
-	return false
+	ext = strings.ToLower(ext)
+	return imageExtensions[ext] || codeExtensions[ext]
 }
 func (s *Server) zipAssetDirectory(w http.ResponseWriter, r *http.Request) {
 	items, err := s.items(r)

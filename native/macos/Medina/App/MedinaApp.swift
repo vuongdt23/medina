@@ -122,6 +122,8 @@ final class LibraryModel {
             playbackEngine = engine
         }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
+        selectedItemID = lesson.id
+        playbackEngine?.play()
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
     }
@@ -221,6 +223,8 @@ final class LibraryModel {
     private func loadQueuedLesson(_ lesson: TreeNode) {
         guard let client, let stream = lesson.streamUrl else { return }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
+        selectedItemID = lesson.id
+        playbackEngine?.play()
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
     }
@@ -240,17 +244,18 @@ final class LibraryModel {
         await loadProgress(courseID: course.id)
     }
 
-    /// Pushes into the course focus screen and loads its content. Reuses
-    /// selectCourse so tree + progress are fetched exactly as before.
+    /// Pushes into the course focus screen and loads its content. Switching to
+    /// a different course stops any playback bound to the previous course.
     func openCourse(_ course: Course) async {
+        if selectedCourseID != course.id { stopPlayback() }
         route = .course(course.id)
         await selectCourse(course)
     }
 
-    /// Returns to the library grid. Playback intentionally keeps running so a
-    /// lesson is not interrupted by browsing; tree/selection are retained for
-    /// instant re-entry.
+    /// Returns to the library grid and stops playback — the player belongs to
+    /// the course being left, so it must not carry over to another course.
     func backToLibrary() {
+        stopPlayback()
         route = .library
     }
 

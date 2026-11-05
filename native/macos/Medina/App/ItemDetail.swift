@@ -3,9 +3,14 @@ import AppKit
 import QuickLookUI
 import MedinaCore
 
-/// The item inspector: an editorial header plus type-appropriate content —
-/// a syntax-highlighted code viewer for source, Quick Look for media/PDF,
-/// play for lessons, and download/ZIP for everything else.
+/// How a selected asset should be previewed inline in the inspector.
+enum PreviewKind {
+    case image, pdf, markdown, code, web, unsupported
+}
+
+/// The item inspector: an editorial header plus a rich inline preview chosen by
+/// file kind — zoomable image, inline PDF, rendered Markdown, highlighted code,
+/// or a sandboxed web view for HTML/SVG — with Quick Look and download actions.
 struct ItemDetail: View {
     let item: TreeNode
     let client: MedinaAPIClient?
@@ -15,9 +20,17 @@ struct ItemDetail: View {
     @Environment(\.colorScheme) private var scheme
     @State private var isWorking = false
     @State private var errorMessage: String?
-    @State private var codeText: String?
+    @State private var previewData: Data?
+    @State private var webMimeType: String = "text/html"
     @State private var localPreviewURL: URL?
     @State private var showingPreview = false
+
+    private var kind: PreviewKind { Self.previewKind(for: item) }
+    /// Decoded UTF-8 text for code/markdown; nil for binary kinds.
+    private var previewText: String? {
+        guard kind == .code || kind == .markdown, let data = previewData else { return nil }
+        return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -26,7 +39,7 @@ struct ItemDetail: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: item.id) { await loadInlineCodeIfNeeded() }
+        .task(id: item.id) { await loadPreviewData() }
         .sheet(isPresented: $showingPreview, onDismiss: removePreviewFile) {
             if let localPreviewURL {
                 NativeQuickLookPreview(url: localPreviewURL)
@@ -80,13 +93,13 @@ struct ItemDetail: View {
                 Button { Task { await downloadAsset() } } label: {
                     Label("Download folder as ZIP", systemImage: "archivebox")
                 }.disabled(isWorking || client == nil)
-            case "asset", "subtitle":
-                if item.type == "asset", supportsQuickLook {
+            case "asset":
+                if supportsQuickLook {
                     Button { Task { await loadPreview() } } label: {
                         Label("Quick Look", systemImage: "eye")
                     }.disabled(isWorking || client == nil)
                 }
-                if let text = codeText {
+                if let text = previewText {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(text, forType: .string)
@@ -105,17 +118,7 @@ struct ItemDetail: View {
     // MARK: Content
 
     @ViewBuilder private var content: some View {
-        if let codeText {
-            CodeViewer(code: codeText, fileExtension: item.fileExtension)
-        } else if isLoadingCode {
-            centered { ProgressView("Loading…").controlSize(.small) }
-        } else if let errorMessage {
-            centered {
-                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red).font(.callout)
-                    .multilineTextAlignment(.center)
-            }
-        } else if item.type == "lesson" {
+        if item.type == "lesson" {
             centered {
                 VStack(spacing: 8) {
                     Image(systemName: item.mediaKind == "audio" ? "music.note" : "play.rectangle")
@@ -123,22 +126,56 @@ struct ItemDetail: View {
                     Text(resumeLabel).font(.callout).foregroundStyle(.secondary)
                 }
             }
-        } else if item.type == "asset", !supportsInline {
+        } else if let errorMessage {
             centered {
-                VStack(spacing: 6) {
-                    Image(systemName: "doc").font(.system(size: 32)).foregroundStyle(.tertiary)
-                    Text("No inline preview for this file type.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Text("Use Quick Look or download the original.")
-                        .font(.caption).foregroundStyle(.tertiary)
-                }
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red).font(.callout)
+                    .multilineTextAlignment(.center)
             }
-        } else if let url = item.contentUrl {
-            centered {
-                Text(url).font(.caption.monospaced()).textSelection(.enabled).foregroundStyle(.secondary)
-            }
+        } else if isWorking && previewData == nil {
+            centered { ProgressView("Loading…").controlSize(.small) }
         } else {
-            Color.clear
+            preview
+        }
+    }
+
+    @ViewBuilder private var preview: some View {
+        switch kind {
+        case .image:
+            if let data = previewData, let image = NSImage(data: data) {
+                ImagePreview(image: image).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else { unsupportedState }
+        case .pdf:
+            if let data = previewData {
+                PDFPreview(data: data).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else { unsupportedState }
+        case .markdown:
+            if let text = previewText {
+                MarkdownPreview(text: text).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else { unsupportedState }
+        case .code:
+            if let text = previewText {
+                CodeViewer(code: text, fileExtension: item.fileExtension)
+            } else { unsupportedState }
+        case .web:
+            if let data = previewData {
+                WebDocumentPreview(data: data, mimeType: webMimeType)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else { unsupportedState }
+        case .unsupported:
+            unsupportedState
+        }
+    }
+
+    private var unsupportedState: some View {
+        centered {
+            VStack(spacing: 6) {
+                Image(systemName: "doc").font(.system(size: 32)).foregroundStyle(.tertiary)
+                Text("No inline preview for this file type.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Text("Use Quick Look or download the original.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
         }
     }
 
@@ -155,7 +192,6 @@ struct ItemDetail: View {
         switch item.type {
         case "lesson": return "play.rectangle"
         case "asset_directory": return "folder"
-        case "subtitle": return "captions.bubble"
         default: return "doc"
         }
     }
@@ -166,26 +202,58 @@ struct ItemDetail: View {
         }
         return "Play from beginning"
     }
-    private var isLoadingCode: Bool { isWorking && item.type == "asset" && supportsInline }
-    private var supportsInline: Bool { CodeViewer.supports(extension: item.fileExtension, mimeType: item.mimeType) }
     private var supportsQuickLook: Bool {
         let ext = (item.fileExtension ?? "").trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
         let mime = (item.mimeType ?? "").split(separator: ";", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
         if ["html", "htm", "xhtml", "svg", "svgz"].contains(ext) { return false }
-        return mime == "application/pdf" || mime.hasPrefix("image/") || mime.hasPrefix("text/") || supportsInline
+        return mime == "application/pdf" || mime.hasPrefix("image/") || mime.hasPrefix("text/")
+            || CodeViewer.supports(extension: item.fileExtension, mimeType: item.mimeType)
     }
+
+    /// Classifies an asset into the inline preview to render. Extension is the
+    /// primary signal (the server's mime database is incomplete — `.kt`, `.webp`
+    /// and others often arrive as `application/octet-stream`), with MIME as a
+    /// fallback. Mirrors the server's widened `previewable` allowlist.
+    static func previewKind(for item: TreeNode) -> PreviewKind {
+        guard item.type == "asset" else { return .unsupported }
+        let ext = (item.fileExtension ?? "").trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
+        let mime = (item.mimeType ?? "").split(separator: ";", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
+        if ["html", "htm", "xhtml", "svg", "svgz"].contains(ext) || mime == "text/html"
+            || mime == "application/xhtml+xml" || mime == "image/svg+xml" { return .web }
+        if Self.imageExtensions.contains(ext) || mime.hasPrefix("image/") { return .image }
+        if ext == "pdf" || mime == "application/pdf" { return .pdf }
+        if ext == "md" || ext == "markdown" { return .markdown }
+        if CodeViewer.supports(extension: item.fileExtension, mimeType: item.mimeType) || mime.hasPrefix("text/") {
+            return .code
+        }
+        return .unsupported
+    }
+
+    /// Raster/vector image extensions renderable by `NSImage`; kept in sync with
+    /// the server's `imageExtensions`. SVG is routed to the web view instead.
+    private static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "tiff", "tif", "ico", "heic", "heif",
+    ]
 
     // MARK: Loading
 
-    @MainActor private func loadInlineCodeIfNeeded() async {
-        codeText = nil
+    @MainActor private func loadPreviewData() async {
+        previewData = nil
         errorMessage = nil
-        guard item.type == "asset", supportsInline, let client else { return }
+        guard item.type == "asset", let client else { return }
+        let kind = self.kind
+        guard kind != .unsupported else { return }
         isWorking = true
         defer { isWorking = false }
         do {
-            let data = try await client.previewAsset(id: item.id)
-            codeText = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+            if kind == .web {
+                // HTML/SVG are 415 on /preview; fetch raw bytes from /content.
+                let (data, mime) = try await client.fetchContent(id: item.id)
+                previewData = data
+                webMimeType = mime ?? (item.mimeType ?? "text/html")
+            } else {
+                previewData = try await client.previewAsset(id: item.id)
+            }
         } catch let MedinaAPIError.httpStatus(status, _) where status == 415 {
             errorMessage = "The server does not allow inline preview for this file. Download the original instead."
         } catch {
@@ -198,15 +266,7 @@ struct ItemDetail: View {
         isWorking = true; errorMessage = nil
         defer { isWorking = false }
         do {
-            let data = try await client.previewAsset(id: item.id)
-            let rawExtension = (item.fileExtension ?? "").trimmingCharacters(in: CharacterSet(charactersIn: ". "))
-            let ext = String(rawExtension.filter { $0.isLetter || $0.isNumber })
-            let suffix = ext.isEmpty ? (item.mimeType == "application/pdf" ? "pdf" : "txt") : ext
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("Medina-\(UUID().uuidString)")
-                .appendingPathExtension(suffix)
-            try data.write(to: url, options: .atomic)
-            localPreviewURL = url
+            localPreviewURL = try await AssetActions.fetchPreviewFile(item, client: client)
             showingPreview = true
         } catch let MedinaAPIError.httpStatus(status, _) where status == 415 {
             errorMessage = "The server does not allow inline preview for this file. Download the original instead."
@@ -217,28 +277,16 @@ struct ItemDetail: View {
 
     @MainActor private func downloadAsset() async {
         guard let client else { return }
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = suggestedFilename
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
         isWorking = true; errorMessage = nil
         defer { isWorking = false }
         do {
-            let url = item.type == "asset_directory"
-                ? client.assetArchiveURL(id: item.id)
-                : client.assetDownloadURL(id: item.id)
-            try await client.download(from: url, to: destination)
+            try await AssetActions.download(item, client: client)
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    private var suggestedFilename: String {
-        let name = (item.originalName ?? item.title) as NSString
-        let safeName = name.lastPathComponent
-        if item.type == "asset_directory", !safeName.lowercased().hasSuffix(".zip") { return safeName + ".zip" }
-        return safeName
-    }
+    private var suggestedFilename: String { AssetActions.suggestedFilename(for: item) }
 
     private func removePreviewFile() {
         if let localPreviewURL { try? FileManager.default.removeItem(at: localPreviewURL) }

@@ -146,6 +146,13 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
         (assets ?? []) + (subtitles ?? [])
     }
 
+    /// Assets that should be surfaced as browsable *resources* — everything in
+    /// `assets` (files and `asset_directory` folders), excluding `subtitles`.
+    /// Subtitles are side-loaded into playback, never shown as downloadable files.
+    public var resourceAssets: [TreeNode] {
+        (assets ?? []).sorted { ($0.position ?? 0, $0.id) < ($1.position ?? 0, $1.id) }
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, type, title, originalName, position, mediaKind, mimeType, sizeBytes
         case streamUrl, contentUrl, children, sections, lessons, assets, subtitles
@@ -157,6 +164,53 @@ public struct OutlineEntry: Identifiable, Sendable {
     public let item: TreeNode
     public let depth: Int
     public var id: String { item.id }
+}
+
+/// One section's content, grouped for the sectioned sidebar. Sections nest:
+/// a group holds its ordered children (direct lessons and subsection groups),
+/// its own resource files/folders, and completion counts over the whole subtree.
+public struct SectionGroup: Identifiable, Sendable {
+    /// An ordered child of a section: either a playable lesson or a subsection.
+    public enum Child: Identifiable, Sendable {
+        case lesson(TreeNode)
+        case subsection(SectionGroup)
+        public var id: String {
+            switch self {
+            case .lesson(let node): return node.id
+            case .subsection(let group): return group.id
+            }
+        }
+    }
+
+    public let section: TreeNode
+    /// Ordered children (direct lessons interleaved with subsections by position).
+    public let children: [Child]
+    public let resources: [TreeNode]
+    public let completed: Int
+    public let total: Int
+    /// Synthetic groups (loose lessons directly under the course root) have no
+    /// real section node and render without a collapsible header.
+    public let isSynthetic: Bool
+
+    public var id: String { section.id }
+    public var isComplete: Bool { total > 0 && completed >= total }
+    public var fraction: Double { total > 0 ? min(1, Double(completed) / Double(total)) : 0 }
+
+    /// Direct lessons only (not recursing into subsections) — used for the
+    /// section's own play button and now-playing containment checks.
+    public var directLessons: [TreeNode] {
+        children.compactMap { if case .lesson(let n) = $0 { return n } else { return nil } }
+    }
+
+    public init(section: TreeNode, children: [Child], resources: [TreeNode],
+                completed: Int, total: Int, isSynthetic: Bool = false) {
+        self.section = section
+        self.children = children
+        self.resources = resources
+        self.completed = completed
+        self.total = total
+        self.isSynthetic = isSynthetic
+    }
 }
 
 public enum CourseTree {
@@ -195,6 +249,81 @@ public enum CourseTree {
         }
         visit(root, depth: 0)
         return result
+    }
+
+    /// Groups the course into sections for the sectioned sidebar. Sections nest
+    /// recursively; lessons that sit directly under the root (no enclosing
+    /// section) are collected into a single leading synthetic group.
+    public static func sectionGroups(of root: TreeNode, progress: CourseProgress) -> [SectionGroup] {
+        var groups: [SectionGroup] = []
+        var looseLessons: [TreeNode] = []
+        for child in root.orderedNavigableChildren {
+            switch child.type {
+            case "lesson":
+                looseLessons.append(child)
+            case "section":
+                groups.append(makeSectionGroup(child, progress: progress))
+            default:
+                break
+            }
+        }
+        if !looseLessons.isEmpty {
+            let completed = looseLessons.filter {
+                progress.progress(for: $0.id)?.isEffectivelyComplete ?? false
+            }.count
+            let synthetic = TreeNode(id: "\(root.id)#loose", type: "section", title: root.title)
+            groups.insert(SectionGroup(section: synthetic,
+                                       children: looseLessons.map { .lesson($0) }, resources: [],
+                                       completed: completed, total: looseLessons.count,
+                                       isSynthetic: true), at: 0)
+        }
+        return groups
+    }
+
+    /// Builds one section group, recursing into subsections and preserving the
+    /// position-ordered interleaving of direct lessons and subsections. Counts
+    /// span the whole subtree; resources are this section's own files plus those
+    /// attached to its direct lessons (subsections carry their own).
+    private static func makeSectionGroup(_ section: TreeNode, progress: CourseProgress) -> SectionGroup {
+        var children: [SectionGroup.Child] = []
+        var resources = section.resourceAssets
+        for child in section.orderedNavigableChildren {
+            switch child.type {
+            case "lesson":
+                children.append(.lesson(child))
+                resources.append(contentsOf: child.resourceAssets)
+            case "section":
+                children.append(.subsection(makeSectionGroup(child, progress: progress)))
+            default:
+                break
+            }
+        }
+        let allLessons = lessons(in: section)
+        let completed = allLessons.filter {
+            progress.progress(for: $0.id)?.isEffectivelyComplete ?? false
+        }.count
+        return SectionGroup(section: section, children: children, resources: resources,
+                            completed: completed, total: allLessons.count)
+    }
+
+    /// Course-level resource files/folders attached directly to the root.
+    public static func courseResources(of root: TreeNode) -> [TreeNode] {
+        root.resourceAssets
+    }
+
+    /// Number of leaf files beneath a resource node (folders recurse into
+    /// `children`; a plain asset counts as one). Subtitles are never resources.
+    public static func resourceFileCount(of node: TreeNode) -> Int {
+        guard node.type == "asset_directory" else { return 1 }
+        return (node.children ?? []).reduce(0) { $0 + resourceFileCount(of: $1) }
+    }
+
+    /// Total bytes beneath a resource node, summing known `sizeBytes`.
+    public static func totalSize(of node: TreeNode) -> Int64 {
+        if node.type == "asset_directory" {
+            return (node.children ?? []).reduce(0) { $0 + totalSize(of: $1) }
+        }
+        return node.sizeBytes ?? 0
     }
 
     /// The lesson to resume: the most recently updated lesson that is not yet
@@ -405,6 +534,10 @@ public final class MedinaAPIClient: Sendable {
         endpoint("/api/v1/assets/\(pathSegment(id))/archive.zip")
     }
 
+    public func assetContentURL(id: String) -> URL {
+        endpoint("/api/v1/assets/\(pathSegment(id))/content")
+    }
+
     public func previewAsset(id: String) async throws -> Data {
         var request = URLRequest(url: assetPreviewURL(id: id))
         request.timeoutInterval = 30
@@ -412,6 +545,21 @@ public final class MedinaAPIClient: Sendable {
         guard let http = response as? HTTPURLResponse else { throw MedinaAPIError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else { throw httpStatusError(http.statusCode, data: data) }
         return data
+    }
+
+    /// Fetches an asset's raw bytes from the content endpoint (which serves any
+    /// asset, including HTML/SVG that `preview` rejects with 415), returning the
+    /// bytes and the server's resolved MIME type when present.
+    public func fetchContent(id: String) async throws -> (data: Data, mimeType: String?) {
+        var request = URLRequest(url: assetContentURL(id: id))
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MedinaAPIError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else { throw httpStatusError(http.statusCode, data: data) }
+        let mime = (http.value(forHTTPHeaderField: "Content-Type"))
+            .flatMap { $0.split(separator: ";", maxSplits: 1).first.map(String.init) }?
+            .trimmingCharacters(in: .whitespaces)
+        return (data, mime)
     }
 
     /// Streams an asset or archive to a user-selected URL without holding the

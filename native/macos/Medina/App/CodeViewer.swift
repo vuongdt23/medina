@@ -74,16 +74,24 @@ struct CodeViewer: NSViewRepresentable {
         guard let raw = ext?.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased(), !raw.isEmpty else { return nil }
         let map: [String: String] = [
             "kt": "kotlin", "kts": "kotlin", "swift": "swift",
-            "go": "go", "rs": "rust", "py": "python", "rb": "ruby",
+            "go": "go", "rs": "rust", "py": "python", "pyw": "python", "rb": "ruby",
             "js": "javascript", "jsx": "javascript", "mjs": "javascript", "cjs": "javascript",
-            "ts": "typescript", "tsx": "typescript",
+            "ts": "typescript", "tsx": "typescript", "mts": "typescript", "cts": "typescript",
             "java": "java", "scala": "scala", "c": "c", "h": "c",
-            "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp",
-            "cs": "csharp", "php": "php", "sh": "bash", "bash": "bash", "zsh": "bash",
-            "json": "json", "yaml": "yaml", "yml": "yaml", "toml": "ini", "ini": "ini",
-            "xml": "xml", "html": "xml", "css": "css", "scss": "scss",
+            "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp", "hh": "cpp",
+            "m": "objectivec", "mm": "objectivec", "cs": "csharp", "fs": "fsharp",
+            "php": "php", "sh": "bash", "bash": "bash", "zsh": "bash", "fish": "bash",
+            "ps1": "powershell", "psm1": "powershell", "bat": "dos", "cmd": "dos",
+            "lua": "lua", "pl": "perl", "pm": "perl", "r": "r", "dart": "dart",
+            "groovy": "groovy", "gradle": "groovy", "clj": "clojure", "ex": "elixir",
+            "exs": "elixir", "erl": "erlang", "hs": "haskell",
+            "json": "json", "jsonc": "json", "yaml": "yaml", "yml": "yaml",
+            "toml": "ini", "ini": "ini", "cfg": "ini", "conf": "ini", "properties": "properties",
+            "xml": "xml", "html": "xml", "css": "css", "scss": "scss", "sass": "scss", "less": "less",
             "sql": "sql", "md": "markdown", "markdown": "markdown",
-            "dockerfile": "dockerfile", "makefile": "makefile", "gradle": "gradle",
+            "graphql": "graphql", "gql": "graphql", "proto": "protobuf",
+            "tf": "hcl", "tfvars": "hcl", "hcl": "hcl",
+            "dockerfile": "dockerfile", "makefile": "makefile",
         ]
         return map[raw]
     }
@@ -93,7 +101,10 @@ struct CodeViewer: NSViewRepresentable {
         let cleanedMime = (mime ?? "").split(separator: ";", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
         if cleanedMime == "application/pdf" || cleanedMime.hasPrefix("image/") { return false }
         if language(for: ext) != nil { return true }
-        let textish = ["txt", "log", "env", "conf", "cfg", "properties", "gitignore", "editorconfig"]
+        // Plain-text and config-ish files hljs can auto-detect or show as text.
+        let textish: Set<String> = [
+            "txt", "text", "log", "env", "gitignore", "editorconfig", "csv", "tsv",
+        ]
         let raw = (ext ?? "").trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
         return textish.contains(raw) || cleanedMime.hasPrefix("text/")
     }

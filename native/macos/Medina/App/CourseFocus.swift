@@ -1,5 +1,6 @@
 import SwiftUI
 import MedinaCore
+import MedinaPlayback
 
 /// The focused course workspace: a top bar with a Back-to-Library control and
 /// the course title, over the structure outline beside the item inspector and
@@ -14,6 +15,7 @@ struct CourseFocus: View {
             Divider().overlay(Theme.hairline(scheme))
             content
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.canvas(scheme))
     }
 
@@ -56,10 +58,11 @@ struct CourseFocus: View {
         if let tree = model.tree {
             HSplitView {
                 CourseOutline(model: model, tree: tree)
-                    .frame(minWidth: 320, idealWidth: 380)
+                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 480)
                 inspector(tree: tree)
-                    .frame(minWidth: 360)
+                    .frame(minWidth: 420, maxWidth: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ContentUnavailableView {
                 Label("Preparing course…", systemImage: "books.vertical")
@@ -71,35 +74,53 @@ struct CourseFocus: View {
     }
 
     @ViewBuilder private func inspector(tree: TreeNode) -> some View {
+        let selected = CourseTree.outline(of: tree).first(where: { $0.id == model.selectedItemID })?.item
+        let isDocument = selected?.type == "asset"
+        let isLesson = selected?.type == "lesson"
+
         VStack(spacing: 0) {
-            if let entry = CourseTree.outline(of: tree).first(where: { $0.id == model.selectedItemID }) {
+            if let engine = model.playbackEngine, !isDocument {
+                // Playing (or loading) media owns the surface — no "press play" page.
+                playbackPanel(engine)
+            } else if isDocument, let selected {
                 ItemDetail(
-                    item: entry.item,
+                    item: selected,
                     client: model.currentClient,
-                    progress: model.courseProgress.progress(for: entry.item.id),
+                    progress: model.courseProgress.progress(for: selected.id),
                     onPlay: { lesson in model.playLesson(lesson) }
                 )
-                .id(entry.id)
+                .id(selected.id)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isLesson {
+                // A lesson is selected but the engine has not spun up yet; it is
+                // loading. Never show a redundant play placeholder.
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.large)
+                    Text(selected?.title ?? "Loading…").font(.callout).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView("Choose a lesson or file",
                                        systemImage: "text.aligncenter",
                                        description: Text("Pick an item from the outline to read, preview, or play it."))
-            }
-            if let engine = model.playbackEngine {
-                Divider()
-                PlaybackPanel(
-                    engine: engine,
-                    lessonTitle: model.lessonQueue?.current?.title ?? engine.title,
-                    upNextTitle: model.lessonQueue?.next?.title,
-                    hasPrevious: model.lessonQueue?.previous != nil,
-                    hasNext: model.lessonQueue?.next != nil,
-                    onPrevious: { model.playPrevious() },
-                    onNext: { model.playNext() },
-                    onStop: { model.stopPlayback() },
-                    onTick: { model.reportPlaybackProgress() }
-                )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.canvas(scheme))
+    }
+
+    private func playbackPanel(_ engine: AVPlaybackEngine) -> PlaybackPanel {
+        PlaybackPanel(
+            engine: engine,
+            lessonTitle: model.lessonQueue?.current?.title ?? engine.title,
+            upNextTitle: model.lessonQueue?.next?.title,
+            hasPrevious: model.lessonQueue?.previous != nil,
+            hasNext: model.lessonQueue?.next != nil,
+            onPrevious: { model.playPrevious() },
+            onNext: { model.playNext() },
+            onStop: { model.stopPlayback() },
+            onTick: { model.reportPlaybackProgress() }
+        )
     }
 }

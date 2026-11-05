@@ -100,6 +100,29 @@ func TestActiveDocumentsAreDownloadOnly(t *testing.T) {
 	}
 }
 
+func TestPreviewableAllowsCodeAndImagesByExtensionWhenMimeIsUnknown(t *testing.T) {
+	// The OS mime database is incomplete, so source and image files frequently
+	// arrive as application/octet-stream. They must still preview by extension.
+	for _, ext := range []string{".kt", ".swift", ".rb", ".php", ".c", ".cpp", ".lua", ".toml"} {
+		if !previewable("application/octet-stream", ext) {
+			t.Errorf("code %s should be previewable with unknown mime", ext)
+		}
+	}
+	for _, ext := range []string{".png", ".webp", ".avif", ".heic", ".tiff"} {
+		if !previewable("application/octet-stream", ext) {
+			t.Errorf("image %s should be previewable with unknown mime", ext)
+		}
+	}
+	// HTML/SVG remain blocked on /preview (served via /content, sandboxed).
+	if previewable("text/html", ".html") || previewable("image/svg+xml", ".svg") {
+		t.Error("active documents must not be previewable")
+	}
+	// Genuinely opaque binaries stay unsupported.
+	if previewable("application/octet-stream", ".bin") {
+		t.Error(".bin should not be previewable")
+	}
+}
+
 func TestAssetTreeSerializesEachItemOnce(t *testing.T) {
 	name := "Course/" + strings.Repeat("nested/", 12) + "leaf.txt"
 	server, store, _ := regressionServer(t, map[string]string{name: "hello"})
