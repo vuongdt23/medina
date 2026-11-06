@@ -4,7 +4,7 @@ import MedinaCore
 import MedinaPlayback
 
 /// Adaptive shell: the inspector and outline keep their identity through live
-/// resizing. Only their geometry changes; the AVPlayer remains model-owned.
+/// resizing. Only their geometry changes; the VLC player remains model-owned.
 struct CourseFocus: View {
     @Bindable var model: LibraryModel
     @Environment(\.colorScheme) private var scheme
@@ -82,6 +82,12 @@ struct CourseFocus: View {
             .keyboardShortcut("f", modifiers: .command)
             .help("Search course lessons (⌘F)")
             .accessibilityLabel("Search course lessons")
+
+            SettingsLink {
+                Image(systemName: "gearshape")
+            }
+            .help("Open Medina settings")
+            .accessibilityLabel("Settings")
 
             Button {
                 if layout == .compact { compactContentOpen.toggle() }

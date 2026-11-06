@@ -4,6 +4,14 @@ import MedinaPlayback
 
 @main
 struct MedinaApp: App {
+    @State private var settings = AppSettings.shared
+
+    init() {
+        // Keep the first VLC lesson from paying libVLC's decoder/plugin startup
+        // cost on the main interaction path.
+        PlaybackSession.prewarmVLC()
+    }
+
     var body: some Scene {
         WindowGroup {
             LibraryWindow()
@@ -11,6 +19,9 @@ struct MedinaApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) { }
+        }
+        Settings {
+            AppSettingsView(settings: settings)
         }
     }
 }
@@ -35,7 +46,7 @@ final class LibraryModel {
         itemSelectionRevision += 1
     }
     var status: IndexStatus?
-    var playbackEngine: AVPlaybackEngine?
+    var playbackEngine: PlaybackSession?
     var lessonQueue: LessonQueue?
     var isWorking = false
     var courseProgress: CourseProgress = .empty
@@ -67,6 +78,7 @@ final class LibraryModel {
     func connect() async {
         let token = UUID()
         connectionToken = token
+        AppSettings.shared.logInfo("Connecting to \(origin)", category: "connection")
         isWorking = true
         defer { isWorking = false }
         do {
@@ -100,6 +112,7 @@ final class LibraryModel {
             courses = try await api.courses(libraryID: library.id)
             guard connectionToken == token else { return }
             connectionMessage = "Connected · API \(info?.apiVersion ?? "?")"
+            AppSettings.shared.logInfo("Connected to Medina API \(info?.apiVersion ?? "?")", category: "connection")
             UserDefaults.standard.set(true, forKey: "hasConnectedSuccessfully")
             errorMessage = nil
             showConnectionSheet = false
@@ -111,6 +124,7 @@ final class LibraryModel {
         } catch {
             guard connectionToken == token else { return }
             connectionMessage = "Connection failed"
+            AppSettings.shared.logInfo("Connection failed: \(error.localizedDescription)", category: "connection")
             showConnectionSheet = true
             errorMessage = error.localizedDescription
             if let cached = cache?.load() {
@@ -123,16 +137,30 @@ final class LibraryModel {
 
     func playLesson(_ lesson: TreeNode) {
         guard lesson.type == "lesson", let client, let stream = lesson.streamUrl else { return }
+        if playbackEngine != nil { reportPlaybackProgress(force: true) }
+        AppSettings.shared.logInfo("Starting lesson '\(lesson.title)' with VLC", category: "playback")
         let lessons = tree.map { CourseTree.lessons(in: $0) } ?? [lesson]
         lessonQueue = LessonQueue(lessons: lessons, startingAt: lesson.id)
         if playbackEngine == nil {
-            let engine = AVPlaybackEngine()
+            let engine = PlaybackSession()
             engine.onNaturalEnd = { [weak self] in self?.advanceAfterNaturalEnd() }
+            engine.onDiagnostic = { isDebug, message in
+                if isDebug { AppSettings.shared.logDebug(message, category: "vlc") }
+                else { AppSettings.shared.logInfo(message, category: "vlc") }
+            }
             playbackEngine = engine
         }
-        playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
+        let saved = courseProgress.lessons[lesson.id]
+        let resumeAt = (saved?.isEffectivelyComplete == false && (saved?.positionSeconds ?? 0) > 1)
+            ? (saved?.positionSeconds ?? 0) : 0
+        let subtitles = (lesson.subtitles ?? []).compactMap { subtitle -> PlaybackSubtitle? in
+            guard let path = subtitle.contentUrl else { return nil }
+            let filename = subtitle.originalName ?? (subtitle.title + (subtitle.fileExtension.map { ".\($0)" } ?? ""))
+            return PlaybackSubtitle(url: client.resolve(path), filename: filename)
+        }
+        playbackEngine?.load(url: client.resolve(stream), title: lesson.title,
+                             subtitles: subtitles, resumeAt: resumeAt)
         selectItem(id: lesson.id)
-        playbackEngine?.play()
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
     }
@@ -166,12 +194,15 @@ final class LibraryModel {
 
     func stopPlayback() {
         reportPlaybackProgress(force: true)
-        playbackEngine?.shutdown()
+        AppSettings.shared.logInfo("Stopping lesson playback", category: "playback")
+        let retiring = playbackEngine
         playbackEngine = nil
         lessonQueue = nil
+        if let retiring { Task { await retiring.shutdown() } }
     }
 
     private func advanceAfterNaturalEnd() {
+        AppSettings.shared.logInfo("Natural end for lesson '\(lessonQueue?.current?.title ?? "unknown")'", category: "playback")
         // A lesson that played to its end is complete regardless of the
         // position the player last reported.
         markCurrentLessonComplete()
@@ -193,6 +224,7 @@ final class LibraryModel {
         lastReportedLessonID = lesson.id
         let position = engine.currentTime
         let duration = engine.duration
+        AppSettings.shared.logDebug("Progress for '\(lesson.title)': \(Int(position))s / \(Int(duration))s", category: "progress")
         let complete = duration > 0 && position / duration >= 0.9
         var record = LessonProgress(itemId: lesson.id, positionSeconds: position,
                                     durationSeconds: duration, completed: complete)
@@ -231,7 +263,12 @@ final class LibraryModel {
 
     private func loadQueuedLesson(_ lesson: TreeNode, userInitiated: Bool = true) {
         guard let client, let stream = lesson.streamUrl else { return }
-        playbackEngine?.load(url: client.resolve(stream), title: lesson.title)
+        let subtitles = (lesson.subtitles ?? []).compactMap { subtitle -> PlaybackSubtitle? in
+            guard let path = subtitle.contentUrl else { return nil }
+            let filename = subtitle.originalName ?? (subtitle.title + (subtitle.fileExtension.map { ".\($0)" } ?? ""))
+            return PlaybackSubtitle(url: client.resolve(path), filename: filename)
+        }
+        playbackEngine?.load(url: client.resolve(stream), title: lesson.title, subtitles: subtitles)
         if userInitiated {
             selectItem(id: lesson.id)
         } else {
@@ -242,7 +279,6 @@ final class LibraryModel {
             }
             if selected?.type != "asset" { selectedItemID = lesson.id }
         }
-        playbackEngine?.play()
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
     }

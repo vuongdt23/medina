@@ -1,7 +1,27 @@
 # Adaptive playback workspace
 
+## Engine rollout
+
+The native macOS app and `MedinaPlayback` target require macOS 15 because they
+use SwiftVLC, pinned exactly to `1.1.0-beta.14`. VLC is Medina's only playback
+engine: it owns one package-managed rendering surface and Medina-owned controls
+(play/pause, seeking, volume, speed, audio/subtitle tracks, and AppKit
+fullscreen). External subtitle sidecars are supplied before playback. System
+PiP is not enabled.
+
+The native app requires Xcode 26.4 / Swift 6.3 or newer to resolve the pinned
+SwiftVLC prerelease. Swift language mode remains Swift 6.
+
 The native macOS course workspace adapts to **window space in logical points**,
 not display resolution. The app supports windows down to 480 × 360 pt.
+
+## Settings and diagnostics
+
+Open app-wide settings from the gear button in either workspace or the standard
+Settings command (⌘,). Logging enablement, minimum Debug/Info level, and
+persistent file logging are stored in UserDefaults. When file logging is
+enabled, logs are kept under `~/Library/Logs/Medina/`; the Settings window can
+open or clear them.
 
 ## Layout
 
@@ -12,10 +32,10 @@ not display resolution. The app supports windows down to 480 × 360 pt.
 - Threshold hysteresis prevents repeated transitions during live resizing.
 - Short windows (under 540 pt tall) omit the resume card and secondary player
   metadata; typography stays readable and primary controls remain available.
-- AVKit aspect-fit rendering preserves the video, including instructional text.
+- VLC aspect-fit rendering preserves the video, including instructional text.
 
 The outline and playback inspector retain their SwiftUI identity across layout
-changes. `LibraryModel` continues to own the AVPlayer. Progress reporting belongs
+changes. `LibraryModel` continues to own the VLC playback session. Progress reporting belongs
 to the course workspace, so it continues while a supporting file is open.
 
 Sidebar width, Focus mode, outline density, and auto-play preference are saved
@@ -38,11 +58,11 @@ Focus mode hides navigation and uses dark appearance in non-compact windows.
 - Section cards use numbered headers, restrained borders, and a warm highlight
   for the current section. Nested sections avoid stacked card backgrounds. A
   header has just one action: expand/collapse; selecting a lesson starts playback.
-- AVKit alone provides play/pause, replay/seeking, volume, fullscreen, speed,
-  audio, and subtitle selection. The footer adds only previous/next **lesson**
-  navigation and an auto-next switch. No second media-control bar.
+- VLC supplies play/pause, seeking, volume, speed, audio/subtitle menus, and
+  public AppKit fullscreen. The footer adds only previous/next **lesson**
+  navigation and an auto-next switch; it is not a duplicate transport bar.
 - The Continue/Resume card appears only before a playback session is active.
-- With auto-play disabled, natural EOF shows completion; replay remains in AVKit.
+- With auto-play disabled, natural EOF shows completion; use the play button to replay.
 
 ## App icon
 
@@ -85,12 +105,12 @@ Manual acceptance checklist (requires the app and playable course media):
 7. Scroll elsewhere while playing. Confirm auto-advance doesn't force scrolling;
    use the scope button to return to the active lesson.
 8. Open a resource while playing; return using the player button in the header.
-9. Select 1.25× in AVKit's native speed controls, pause/resume, and advance.
-   Confirm the native speed selection persists; no duplicate footer menu appears.
-10. Disable auto-next, finish a lesson, replay using AVKit, and manually advance.
+9. Select a VLC playback speed, pause/resume, and advance. Confirm the selection
+   persists and the footer has no duplicate transport controls.
+10. Disable auto-next, finish a lesson, replay with the VLC controls, and manually advance.
     Confirm completion is recorded and the last lesson has a disabled Next button.
 11. Check light/dark appearance, keyboard navigation, and VoiceOver. Hidden
     course navigation must not retain interactive controls in the tab order.
 
-Physical display transitions and live AVKit rendering require manual validation;
+Physical display transitions and live VLC rendering require manual validation;
 unit tests do not substitute for those checks.

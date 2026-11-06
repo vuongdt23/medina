@@ -1,7 +1,7 @@
 name: Medina
 options:
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
   createIntermediateGroups: true
 packages:
   MedinaCore:
@@ -27,6 +27,6 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_FILE: Medina/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
         SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: YES

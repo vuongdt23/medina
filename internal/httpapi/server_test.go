@@ -274,6 +274,23 @@ func TestContentServesRangesAndRejectsTraversal(t *testing.T) {
 	if ifRangeRec.Code != http.StatusOK || ifRangeRec.Body.String() != "0123456789" {
 		t.Fatalf("If-Range should fall back to full response: status=%d body=%q", ifRangeRec.Code, ifRangeRec.Body.String())
 	}
+	// The ETag must be strong (no W/ prefix): media players (libVLC) seek with
+	// Range + If-Range, and a weak validator makes every conditional range fail,
+	// collapsing the seek to a full-file 200 the demuxer rejects.
+	servedETag := rec.Header().Get("ETag")
+	if strings.HasPrefix(servedETag, "W/") {
+		t.Fatalf("content ETag must be strong for range validation, got %q", servedETag)
+	}
+	// A matching If-Range must preserve the Range and return 206 with the exact
+	// bytes — the seek case that was broken when the ETag was weak.
+	ifRangeMatch := httptest.NewRequest(http.MethodGet, "/api/v1/lessons/"+id+"/content", nil)
+	ifRangeMatch.Header.Set("Range", "bytes=2-5")
+	ifRangeMatch.Header.Set("If-Range", servedETag)
+	ifRangeMatchRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(ifRangeMatchRec, ifRangeMatch)
+	if ifRangeMatchRec.Code != http.StatusPartialContent || ifRangeMatchRec.Body.String() != "2345" {
+		t.Fatalf("matching If-Range should return 206 partial: status=%d body=%q", ifRangeMatchRec.Code, ifRangeMatchRec.Body.String())
+	}
 	bad := httptest.NewRequest(http.MethodGet, "/api/v1/lessons/../../etc/passwd/content", nil)
 	badRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(badRec, bad)

@@ -764,7 +764,12 @@ func (s *Server) contentAs(w http.ResponseWriter, r *http.Request, item *scanner
 		contentDisposition = mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(item.OriginalName)})
 	}
 	w.Header().Set("Content-Disposition", contentDisposition)
-	etag := fmt.Sprintf("W/\"%s-%d-%d\"", item.ID, st.Size(), st.ModTime().UnixNano())
+	// A strong validator: size + mtime uniquely identify these exact bytes.
+	// It must be strong (not W/) so http.ServeContent can honor If-Range for
+	// range requests — libVLC seeks with Range + If-Range, and a weak ETag
+	// makes every such conditional fail, collapsing the seek to a full-file
+	// 200 that the demuxer rejects as "Invalid data".
+	etag := fmt.Sprintf("\"%s-%d-%d\"", item.ID, st.Size(), st.ModTime().UnixNano())
 	w.Header().Set("ETag", etag)
 	if forceInline && (strings.HasPrefix(item.MimeType, "text/") || isCodeExtension(strings.ToLower(filepath.Ext(item.OriginalName)))) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -782,19 +787,10 @@ func (s *Server) contentAs(w http.ResponseWriter, r *http.Request, item *scanner
 			return
 		}
 	}
-	if ifRange := r.Header.Get("If-Range"); ifRange != "" {
-		valid := ifRange == etag && !strings.HasPrefix(ifRange, "W/")
-		if !strings.HasPrefix(ifRange, "W/") && !strings.HasPrefix(ifRange, "\"") {
-			if date, err := http.ParseTime(ifRange); err == nil {
-				valid = !st.ModTime().After(date.Add(time.Second - time.Nanosecond))
-			}
-		}
-		if !valid {
-			r = r.Clone(r.Context())
-			r.Header = r.Header.Clone()
-			r.Header.Del("Range")
-		}
-	}
+	// http.ServeContent handles Range, If-Range, and 416 per RFC 7233 using
+	// the strong ETag and modtime above. Do not pre-process If-Range here:
+	// stripping Range on a conditional miss would turn a seek into a full-file
+	// 200 that media demuxers reject.
 	http.ServeContent(w, r, item.OriginalName, st.ModTime(), f)
 }
 func etagMatches(header, current string) bool {

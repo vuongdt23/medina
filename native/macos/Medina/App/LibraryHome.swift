@@ -52,6 +52,13 @@ struct LibraryHome: View {
 
     private var connectionControls: some View {
         HStack(spacing: 12) {
+            SettingsLink {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Open Medina settings")
+            .accessibilityLabel("Settings")
             HStack(spacing: 6) {
                 Circle()
                     .fill(model.errorMessage == nil && model.connectionMessage.hasPrefix("Connected") ? Theme.done : Color.orange)

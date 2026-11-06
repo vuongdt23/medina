@@ -1,11 +1,10 @@
 import SwiftUI
-import AVKit
+import AppKit
 import MedinaPlayback
 
-/// AVKit owns media controls. Medina adds only course-level navigation and
-/// auto-advance, styled as lesson context rather than a second transport bar.
+/// Medina adds lesson navigation and auto-advance plus VLC on-screen controls.
 struct PlaybackPanel: View {
-    let engine: AVPlaybackEngine
+    let engine: PlaybackSession
     let lessonTitle: String
     let lessonContext: String
     let upNextTitle: String?
@@ -17,6 +16,9 @@ struct PlaybackPanel: View {
     let onNext: () -> Void
 
     @Environment(\.colorScheme) private var scheme
+    @State private var vlcControlsVisible = true
+    @State private var hideControlsTask: Task<Void, Never>?
+    @State private var scrubPosition: Double?
 
     var body: some View {
         GeometryReader { geometry in
@@ -24,8 +26,12 @@ struct PlaybackPanel: View {
             VStack(spacing: 0) {
                 ZStack {
                     Color.black
-                    NativeAVPlayerView(player: engine.player)
+                    PlaybackVideoSurface(session: engine)
                         .accessibilityLabel("Video player: \(lessonTitle)")
+                    if vlcControlsVisible {
+                        vlcControls(compact: compact)
+                            .transition(.opacity)
+                    }
                     if case .failed(let message) = engine.state {
                         VStack(spacing: 12) {
                             Image(systemName: "exclamationmark.triangle").font(.title)
@@ -71,7 +77,206 @@ struct PlaybackPanel: View {
                     Rectangle().fill(Theme.hairline(scheme)).frame(height: 1)
                 }
             }
+            .onContinuousHover { phase in
+                if case .active = phase { revealVLCControls() }
+            }
+            .onChange(of: engine.state) { _, state in
+                if state == .playing { scheduleVLCControlsHide() }
+                else { revealVLCControls() }
+            }
+            .onAppear { scheduleVLCControlsHide() }
+            .onDisappear { hideControlsTask?.cancel() }
         }
+    }
+
+    /// VLC's drawable needs mouse input to remain unobstructed. Match the
+    /// native-player convention: show the on-screen controls on movement and
+    /// hide them shortly after playback resumes.
+    private func revealVLCControls() {
+        hideControlsTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { vlcControlsVisible = true }
+        if engine.state == .playing { scheduleVLCControlsHide() }
+    }
+
+    private func scheduleVLCControlsHide() {
+        hideControlsTask?.cancel()
+        guard engine.state == .playing else {
+            vlcControlsVisible = true
+            return
+        }
+        hideControlsTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, engine.state == .playing else { return }
+            withAnimation(.easeOut(duration: 0.2)) { vlcControlsVisible = false }
+        }
+    }
+
+    private func toggleFullscreen() {
+        // `keyWindow` can be nil while a borderless SwiftUI control is active;
+        // fall back to the app's main content window rather than doing nothing.
+        (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+    }
+
+    private func vlcControls(compact: Bool) -> some View {
+        VStack {
+            Spacer()
+            VStack(spacing: 8) {
+                Slider(value: playbackPosition, in: 0...max(engine.duration, 1), onEditingChanged: { editing in
+                    if !editing, let target = scrubPosition {
+                        // Submitting every drag sample overwhelms libVLC's
+                        // serialized seek queue and can leave it at EOF. Keep
+                        // the thumb responsive locally, then make one exact
+                        // seek when the user releases it.
+                        engine.seek(to: target)
+                        scrubPosition = nil
+                    }
+                })
+                    .disabled(!engine.isSeekable || (engine.knownDuration ?? 0) <= 0)
+                    .accessibilityLabel("Playback position")
+                if compact {
+                    compactVLCTransport
+                } else {
+                    regularVLCTransport
+                }
+            }
+            .padding(.horizontal, compact ? 12 : 16).padding(.vertical, 10)
+            .frame(maxWidth: compact ? 680 : 960)
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .font(.system(size: 13, weight: .semibold))
+            .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 10))
+            .padding(12)
+        }
+    }
+
+    private var playbackPosition: Binding<Double> {
+        Binding(
+            get: {
+                let upperBound = max(engine.duration, 1)
+                return min(upperBound, max(0, scrubPosition ?? engine.currentTime))
+            },
+            set: { scrubPosition = $0 }
+        )
+    }
+
+    private var compactVLCTransport: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 14) {
+                skipButton(-10)
+                playPauseButton
+                skipButton(10)
+                Text(timeText).font(.system(.caption, design: .monospaced))
+                Spacer(minLength: 0)
+                fullscreenButton
+            }
+            HStack(spacing: 14) {
+                speedMenu
+                tracksMenu
+                muteButton
+                volumeSlider(width: 76)
+            }
+        }
+    }
+
+    private var regularVLCTransport: some View {
+        HStack(spacing: 14) {
+            skipButton(-10)
+            playPauseButton
+            skipButton(10)
+            Text(timeText).font(.system(.caption, design: .monospaced))
+            Spacer(minLength: 8)
+            speedMenu
+            if !engine.audioTracks.isEmpty { audioMenu }
+            subtitlesMenu
+            muteButton
+            volumeSlider(width: 86)
+            fullscreenButton
+        }
+    }
+
+    private func skipButton(_ seconds: Double) -> some View {
+        Button { engine.skip(by: seconds) } label: {
+            Image(systemName: seconds < 0 ? "gobackward.10" : "goforward.10")
+        }
+        .accessibilityLabel(seconds < 0 ? "Back 10 seconds" : "Forward 10 seconds")
+        .disabled(!engine.isSeekable)
+        .help(seconds < 0 ? "Back 10 seconds" : "Forward 10 seconds")
+    }
+
+    private var playPauseButton: some View {
+        Button { engine.togglePlayback() } label: {
+            Image(systemName: engine.state == .playing ? "pause.fill" : "play.fill")
+        }
+        .accessibilityLabel(engine.state == .playing ? "Pause" : "Play")
+        .help(engine.state == .playing ? "Pause" : "Play")
+    }
+
+    private var speedMenu: some View {
+        Menu("\(engine.playbackSpeed, specifier: "%.2g")×") {
+            ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0], id: \.self) { rate in
+                Button("\(rate, specifier: "%.2g")×") { engine.setSpeed(Float(rate)) }
+            }
+        }
+        .help("Playback speed")
+    }
+
+    private var tracksMenu: some View {
+        Menu {
+            if !engine.audioTracks.isEmpty { audioMenu }
+            subtitlesMenu
+        } label: {
+            Image(systemName: "captions.bubble")
+        }
+        .help("Audio and subtitle tracks")
+    }
+
+    private var audioMenu: some View {
+        Menu("Audio") {
+            ForEach(engine.audioTracks) { track in
+                Button(track.title) { engine.selectAudioTrack(id: track.id) }
+            }
+        }
+    }
+
+    private var subtitlesMenu: some View {
+        Menu("Subtitles") {
+            Button("Off") { engine.selectSubtitleTrack(id: nil) }
+            ForEach(engine.subtitleTracks) { track in
+                Button(track.title) { engine.selectSubtitleTrack(id: track.id) }
+            }
+        }
+    }
+
+    private var muteButton: some View {
+        Button { engine.toggleMute() } label: {
+            Image(systemName: engine.isMuted || engine.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        }
+        .accessibilityLabel("Mute or unmute")
+        .help("Mute or unmute")
+    }
+
+    private func volumeSlider(width: CGFloat) -> some View {
+        Slider(value: Binding(get: { Double(engine.volume) }, set: { engine.setVolume(Float($0)) }), in: 0...1)
+            .frame(width: width)
+            .accessibilityLabel("Volume")
+    }
+
+    private var fullscreenButton: some View {
+        Button(action: toggleFullscreen) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+        }
+        .accessibilityLabel("Enter or exit fullscreen")
+        .help("Enter or exit fullscreen")
+    }
+
+    private var timeText: String {
+        "\(timeLabel(engine.currentTime)) / \(engine.knownDuration.map(timeLabel) ?? "--:--")"
+    }
+
+    private func timeLabel(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let value = Int(seconds)
+        return String(format: "%d:%02d", value / 60, value % 60)
     }
 
     private var lessonHeading: some View {
@@ -140,20 +345,5 @@ struct PlaybackPanel: View {
                 .accessibilityLabel("Automatically play next lesson")
         }
         .fixedSize(horizontal: !compact, vertical: true)
-    }
-}
-
-struct NativeAVPlayerView: NSViewRepresentable {
-    let player: AVPlayer
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.player = player
-        view.controlsStyle = .inline
-        view.videoGravity = .resizeAspect
-        view.showsFullScreenToggleButton = true
-        return view
-    }
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        if view.player !== player { view.player = player }
     }
 }
