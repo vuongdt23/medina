@@ -31,6 +31,7 @@ public enum LessonSearch {
     public static func results(in tree: TreeNode, query: String) -> [LessonSearchResult] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
+        let root = CourseTree.effectiveRoot(of: tree)
         var results: [LessonSearchResult] = []
         func visit(_ node: TreeNode, path: [String]) {
             for child in node.orderedNavigableChildren {
@@ -44,7 +45,7 @@ public enum LessonSearch {
                 }
             }
         }
-        visit(tree, path: [])
+        visit(root, path: [])
         return results
     }
 }

@@ -34,4 +34,19 @@ final class WorkspaceLayoutTests: XCTestCase {
         XCTAssertTrue(LessonSearch.results(in: tree, query: "   ").isEmpty)
         XCTAssertTrue(LessonSearch.results(in: tree, query: "missing").isEmpty)
     }
+
+    func testSearchOmitsRedundantWrapperSectionFromBreadcrumb() {
+        let lesson = TreeNode(id: "1", type: "lesson", title: "Welcome to Data Engineering Essentials", position: 0)
+        let sec1 = TreeNode(id: "s1", type: "section", title: "Welcome to Data Engineering Essentials", position: 0, lessons: [lesson])
+        let sec2 = TreeNode(id: "s2", type: "section", title: "Overview of Modern Data Architecture", position: 1,
+                            lessons: [TreeNode(id: "2", type: "lesson", title: "Architecture", position: 0)])
+        let wrapper = TreeNode(id: "wrap", type: "section",
+                               title: "data-engineering-essentials-hands-on-sql-python-and-spark",
+                               sections: [sec1, sec2])
+        let tree = TreeNode(id: "root", type: "course",
+                            title: "[FreeCourseSite.com] Udemy - Data Engineering Essentials Hands-on - SQL, Python, and Spark",
+                            sections: [wrapper])
+        XCTAssertEqual(LessonSearch.results(in: tree, query: "Welcome").first?.sectionPath,
+                       "Welcome to Data Engineering Essentials")
+    }
 }

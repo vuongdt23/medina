@@ -11,7 +11,11 @@ struct LibraryHome: View {
     private var filtered: [Course] {
         let q = model.courseSearch.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return model.courses }
-        return model.courses.filter { $0.title.lowercased().contains(q) }
+        return model.courses.filter {
+            $0.title.lowercased().contains(q)
+                || CourseName.clean($0.title).lowercased().contains(q)
+                || ($0.originalName?.lowercased().contains(q) ?? false)
+        }
     }
 
     var body: some View {

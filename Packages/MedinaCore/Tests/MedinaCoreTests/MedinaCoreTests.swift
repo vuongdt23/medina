@@ -189,4 +189,71 @@ final class MedinaCoreTests: XCTestCase {
         XCTAssertEqual(CourseTree.totalSize(of: folder), 350)
         XCTAssertEqual(CourseTree.resourceFileCount(of: a), 1)
     }
+
+    func testWrapperSubdirectoryPromotesRealSectionsAndMergesCourseResources() {
+        let l1 = TreeNode(id: "l1", type: "lesson", title: "Welcome to Data Engineering Essentials",
+                          originalName: "001 Welcome to Data Engineering Essentials.mp4", position: 0)
+        let l2 = TreeNode(id: "l2", type: "lesson", title: "Overview of Modern Data",
+                          originalName: "001 Overview of Modern Data.mp4", position: 0)
+        let sec1 = TreeNode(id: "sec1", type: "section", title: "Welcome to Data Engineering Essentials",
+                            originalName: "01 - Welcome to Data Engineering Essentials", position: 0, lessons: [l1])
+        let sec2 = TreeNode(id: "sec2", type: "section", title: "Overview of Modern Data Architecture",
+                            originalName: "02 -Overview of Modern Data Architecture", position: 1, lessons: [l2])
+        let bonus = TreeNode(id: "bonus", type: "asset", title: "bonus-lecture",
+                             originalName: "bonus-lecture.html", position: 2)
+        let wrapper = TreeNode(
+            id: "wrapper",
+            type: "section",
+            title: "data-engineering-essentials-hands-on-sql-python-and-spark",
+            originalName: "data-engineering-essentials-hands-on-sql-python-and-spark",
+            position: 2,
+            sections: [sec1, sec2],
+            assets: [bonus]
+        )
+        let promoURL = TreeNode(id: "url1", type: "asset", title: "[FreeCoursesOnline.Me]",
+                                originalName: "[FreeCoursesOnline.Me].url", position: 0)
+        let root = TreeNode(
+            id: "course",
+            type: "course",
+            title: "[FreeCourseSite.com] Udemy - Data Engineering Essentials Hands-on - SQL, Python, and Spark",
+            originalName: "[FreeCourseSite.com] Udemy - Data Engineering Essentials Hands-on - SQL, Python, and Spark",
+            sections: [wrapper],
+            assets: [promoURL]
+        )
+
+        let groups = CourseTree.sectionGroups(of: root, progress: .empty)
+        XCTAssertEqual(groups.map(\.id), ["sec1", "sec2"],
+                       "wrapper directory must be collapsed so real sections render as top-level section cards")
+        XCTAssertEqual(CourseTree.courseResources(of: root).map(\.id), ["bonus", "url1"],
+                       "inner course-level assets and outer root assets should merge into Course resources")
+        XCTAssertEqual(CourseTree.lessons(in: root).map(\.id), ["l1", "l2"])
+        XCTAssertFalse(CourseTree.outline(of: root).contains(where: { $0.id == "wrapper" }))
+    }
+
+    func testChainedWrapperDirectoriesAndCourseNameCleaning() {
+        XCTAssertEqual(
+            CourseName.clean("[FreeCourseSite.com] Udemy - Data Engineering Essentials Hands-on - SQL, Python, and Spark"),
+            "Data Engineering Essentials Hands-on - SQL, Python, and Spark"
+        )
+        XCTAssertTrue(
+            CourseName.isWrapperDirectoryName(
+                "data-engineering-essentials-hands-on-sql-python-and-spark",
+                forCourse: "[FreeCourseSite.com] Udemy - Data Engineering Essentials Hands-on - SQL, Python, and Spark"
+            )
+        )
+        XCTAssertFalse(CourseName.isWrapperDirectoryName("01 - Welcome", forCourse: "Go Basics"))
+
+        let lesson = TreeNode(id: "l1", type: "lesson", title: "Intro", position: 0)
+        let realSection = TreeNode(id: "s1", type: "section", title: "Getting Started",
+                                   originalName: "01 - Getting Started", position: 0, lessons: [lesson])
+        let innerWrapper = TreeNode(id: "w2", type: "section", title: "go-the-complete-guide",
+                                    originalName: "go-the-complete-guide", position: 0, sections: [realSection])
+        let outerWrapper = TreeNode(id: "w1", type: "section", title: "[FreeCourseSite.com] Udemy - Go - The Complete Guide",
+                                    originalName: "[FreeCourseSite.com] Udemy - Go - The Complete Guide", position: 0, sections: [innerWrapper])
+        let root = TreeNode(id: "course", type: "course", title: "[FreeCourseSite.com] Udemy - Go - The Complete Guide",
+                            sections: [outerWrapper])
+
+        let groups = CourseTree.sectionGroups(of: root, progress: .empty)
+        XCTAssertEqual(groups.map(\.id), ["s1"])
+    }
 }

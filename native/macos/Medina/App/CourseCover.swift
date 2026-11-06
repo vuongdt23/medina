@@ -23,8 +23,9 @@ struct CourseCover: View {
         .scaleEffect(hovering ? 1.015 : 1)
         .animation(.easeOut(duration: 0.18), value: hovering)
         .onHover { hovering = $0 }
-        .accessibilityLabel(course.title)
+        .accessibilityLabel(CourseName.clean(course.title))
         .accessibilityHint("Open course")
+        .help(course.originalName ?? course.title)
     }
 
     private var card: some View {
@@ -92,33 +93,5 @@ struct CourseCover: View {
             Text(isLastOpened ? "Last opened" : "Course")
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
-    }
-}
-
-/// Helpers to make noisy scene-release course names presentable.
-enum CourseName {
-    /// Strips leading source tags like "[WebToolTip.com]" and "Udemy -" so the
-    /// human title reads cleanly on cards.
-    static func clean(_ raw: String) -> String {
-        var s = raw
-        // Drop a leading bracketed tag, e.g. "[FreeCourseSite.com] ".
-        if let close = s.firstIndex(of: "]"), s.first == "[" {
-            s = String(s[s.index(after: close)...])
-        }
-        s = s.trimmingCharacters(in: .whitespaces)
-        for prefix in ["Udemy -", "Udemy–", "Udemy", "[Udemy]"] {
-            if s.hasPrefix(prefix) { s = String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces) }
-        }
-        return s.isEmpty ? raw : s
-    }
-
-    /// Up to two initials from the cleaned title for the cover monogram.
-    static func monogram(_ raw: String) -> String {
-        let words = clean(raw)
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .filter { !$0.isEmpty }
-        let initials = words.prefix(2).compactMap { $0.first }.map(String.init)
-        let joined = initials.joined().uppercased()
-        return joined.isEmpty ? "•" : joined
     }
 }

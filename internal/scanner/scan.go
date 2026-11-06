@@ -325,10 +325,10 @@ func ScanWithOptions(ctx context.Context, root string, options Options, onBatch 
 			continue
 		}
 		stem := normalizeBase(it.RelativePath)
-		if it.Type == "subtitle" {
-			stem = subtitleBase(it.RelativePath)
-		}
 		candidates := lessons[stem]
+		if it.Type == "subtitle" && len(candidates) != 1 {
+			candidates = lessons[subtitleBase(it.RelativePath)]
+		}
 		if len(candidates) != 1 {
 			continue
 		}
@@ -484,7 +484,20 @@ func cleanTitle(stem string) string {
 	}
 	prefix := strings.Trim(fields[0], "._- ")
 	if _, err := strconv.Atoi(prefix); err == nil {
-		stem = strings.TrimLeft(strings.TrimPrefix(stem, fields[0]), " ._-\t")
+		if trimmed := strings.TrimLeft(strings.TrimPrefix(stem, fields[0]), " ._-\t"); trimmed != "" {
+			stem = trimmed
+		}
+	} else {
+		trimmed := strings.TrimLeft(stem, " \t")
+		digits := 0
+		for digits < len(trimmed) && trimmed[digits] >= '0' && trimmed[digits] <= '9' {
+			digits++
+		}
+		if digits > 0 && digits < len(trimmed) && (trimmed[digits] == '-' || trimmed[digits] == '_') {
+			if rest := strings.TrimLeft(trimmed[digits:], " ._-\t"); rest != "" {
+				stem = rest
+			}
+		}
 	}
 	return strings.Join(strings.Fields(stem), " ")
 }
@@ -524,14 +537,35 @@ func normalizeBase(rel string) string {
 }
 func subtitleBase(rel string) string {
 	stem := normalizeBase(rel)
-	parts := strings.Split(stem, ".")
-	for len(parts) > 1 {
-		tail := parts[len(parts)-1]
-		if tail == "forced" || tail == "sdh" || tail == "cc" || tail == "hi" || len(tail) == 2 || len(tail) == 5 && strings.Contains(tail, "-") {
-			parts = parts[:len(parts)-1]
+	for {
+		if next, ok := trimSubtitleSuffix(stem, "."); ok {
+			stem = next
+			continue
+		}
+		if next, ok := trimSubtitleSuffix(stem, "_"); ok {
+			stem = next
 			continue
 		}
 		break
 	}
-	return strings.Join(parts, ".")
+	return stem
+}
+
+func isSubtitleTag(tag string) bool {
+	tag = strings.ToLower(tag)
+	if tag == "forced" || tag == "sdh" || tag == "cc" || tag == "hi" || len(tag) == 2 {
+		return true
+	}
+	return len(tag) == 5 && (tag[2] == '-' || tag[2] == '_')
+}
+
+func trimSubtitleSuffix(stem, sep string) (string, bool) {
+	idx := strings.LastIndex(stem, sep)
+	if idx <= 0 || strings.Contains(stem[idx+len(sep):], "/") {
+		return stem, false
+	}
+	if isSubtitleTag(stem[idx+len(sep):]) {
+		return stem[:idx], true
+	}
+	return stem, false
 }

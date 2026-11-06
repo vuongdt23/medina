@@ -166,6 +166,109 @@ public struct OutlineEntry: Identifiable, Sendable {
     public var id: String { item.id }
 }
 
+/// Helpers to make noisy scene-release course names presentable and to detect
+/// redundant wrapper subdirectories that mirror the course title.
+public enum CourseName {
+    private static let providerPrefixes = [
+        "udemy -", "udemy–", "udemy —", "udemy:", "[udemy]", "udemy",
+    ]
+
+    private static let genericWrapperTokens: Set<String> = [
+        "course", "courses", "content", "coursecontent",
+        "videos", "video", "lectures", "lessons", "main", "files", "coursefiles",
+    ]
+
+    /// Strips leading/trailing source tags like `[FreeCourseSite.com]` and
+    /// provider prefixes like `Udemy -` so human titles read cleanly.
+    public static func clean(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.first == "[", let close = s.firstIndex(of: "]") {
+            s = String(s[s.index(after: close)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var strippedPrefix = true
+        while strippedPrefix {
+            strippedPrefix = false
+            let lower = s.lowercased()
+            for prefix in providerPrefixes where lower.hasPrefix(prefix) {
+                let candidate = String(s.dropFirst(prefix.count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " -–—:\t"))
+                if !candidate.isEmpty {
+                    s = candidate
+                    strippedPrefix = true
+                    break
+                }
+            }
+        }
+        while s.last == "]", let open = s.lastIndex(of: "["), open > s.startIndex {
+            let candidate = String(s[..<open]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty {
+                s = candidate
+            } else {
+                break
+            }
+        }
+        return s.isEmpty ? raw : s
+    }
+
+    /// Up to two initials from the cleaned title for the cover monogram.
+    public static func monogram(_ raw: String) -> String {
+        let words = clean(raw)
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .filter { !$0.isEmpty }
+        let initials = words.prefix(2).compactMap { $0.first }.map(String.init)
+        let joined = initials.joined().uppercased()
+        return joined.isEmpty ? "•" : joined
+    }
+
+    /// True when `raw` starts with a numeric index prefix (e.g. `01 - Intro`,
+    /// `02. Overview`, `001_Welcome`).
+    public static func hasLeadingIndex(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first.isNumber else { return false }
+        let afterDigits = trimmed.drop(while: { $0.isNumber })
+        guard let sep = afterDigits.first else { return false }
+        return sep == " " || sep == "-" || sep == "_" || sep == "." || sep == ")"
+    }
+
+    /// True when `candidate` is a wrapper directory name that repeats or slugs
+    /// the course title (e.g. `data-engineering-essentials-hands-on-sql-python-and-spark`
+    /// under `[FreeCourseSite.com] Udemy - Data Engineering Essentials Hands-on - SQL, Python, and Spark`)
+    /// or uses a generic container name like `Course Content` / `Videos`.
+    public static func isWrapperDirectoryName(_ candidate: String, forCourse courseTitle: String) -> Bool {
+        if hasLeadingIndex(candidate) { return false }
+        let candidateWords = normalizedTokens(of: clean(candidate))
+        guard !candidateWords.isEmpty else { return false }
+        let candidateJoined = candidateWords.joined()
+        if genericWrapperTokens.contains(candidateJoined) {
+            return true
+        }
+        let courseWords = normalizedTokens(of: clean(courseTitle))
+        let rawCourseWords = normalizedTokens(of: courseTitle)
+        guard !courseWords.isEmpty else { return false }
+        let courseJoined = courseWords.joined()
+        let rawJoined = rawCourseWords.joined()
+        if candidateJoined == courseJoined || candidateJoined == rawJoined {
+            return true
+        }
+        if candidateWords.count >= 2 && courseWords.count >= 2 {
+            if courseWords.starts(with: candidateWords) || candidateWords.starts(with: courseWords) {
+                return true
+            }
+            if candidateJoined.count >= 10 && (courseJoined.contains(candidateJoined) || candidateJoined.contains(courseJoined)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func normalizedTokens(of text: String) -> [String] {
+        text.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+}
+
 /// One section's content, grouped for the sectioned sidebar. Sections nest:
 /// a group holds its ordered children (direct lessons and subsection groups),
 /// its own resource files/folders, and completion counts over the whole subtree.
@@ -214,8 +317,85 @@ public struct SectionGroup: Identifiable, Sendable {
 }
 
 public enum CourseTree {
+    /// Many production course directories have an outer release/archive folder
+    /// whose only navigable child is the true course directory (for example,
+    /// `[FreeCourseSite.com] Udemy - Foo/foo/01 - Intro/...`), often alongside
+    /// loose `.url`/readme files at the outer root. Collapse that redundant
+    /// wrapper chain so its child sections become the top-level course sections
+    /// and its course-level files surface in Course resources.
+    public static func effectiveRoot(of root: TreeNode) -> TreeNode {
+        guard root.type == "course" else { return root }
+        let courseTitle = root.originalName ?? root.title
+        var current = root
+        while let unwrapped = unwrapSingleWrapperSection(of: current, courseTitle: courseTitle) {
+            current = unwrapped
+        }
+        return current
+    }
+
+    private static func unwrapSingleWrapperSection(of current: TreeNode, courseTitle: String) -> TreeNode? {
+        guard (current.lessons ?? []).isEmpty,
+              let sections = current.sections,
+              sections.count == 1,
+              let onlySection = sections.first,
+              shouldUnwrapRootSection(onlySection, courseTitle: courseTitle) else {
+            return nil
+        }
+        var promoted = current
+        promoted.sections = onlySection.sections
+        promoted.lessons = onlySection.lessons
+        let mergedAssets = (onlySection.resourceAssets + current.resourceAssets).enumerated().map { index, item -> TreeNode in
+            var copy = item
+            copy.position = index
+            return copy
+        }
+        promoted.assets = mergedAssets.isEmpty ? nil : mergedAssets
+        let mergedSubtitles = (onlySection.subtitles ?? []) + (current.subtitles ?? [])
+        promoted.subtitles = mergedSubtitles.isEmpty ? nil : mergedSubtitles
+        return promoted
+    }
+
+    private static func shouldUnwrapRootSection(_ onlySection: TreeNode, courseTitle: String) -> Bool {
+        let childSections = onlySection.sections ?? []
+        let directLessons = onlySection.lessons ?? []
+        let candidateName = onlySection.originalName ?? onlySection.title
+
+        // 1. A single child directory that holds no direct lessons and fans out
+        //    into multiple sections is a pure wrapper directory.
+        if directLessons.isEmpty && childSections.count > 1 {
+            return true
+        }
+
+        // 2. A chain of single-child wrapper directories (e.g. double-extracted
+        //    archives) that eventually unwraps.
+        if directLessons.isEmpty && childSections.count == 1,
+           let nested = childSections.first,
+           shouldUnwrapRootSection(nested, courseTitle: courseTitle) {
+            return true
+        }
+
+        // 3. A single child directory whose name mirrors the course title (e.g.
+        //    `data-engineering-essentials-...` inside `[FreeCourseSite.com] Udemy - Data Engineering...`)
+        //    or is a generic wrapper name (`Course Content`, `Videos`, etc.).
+        if (!childSections.isEmpty || !directLessons.isEmpty)
+            && CourseName.isWrapperDirectoryName(candidateName, forCourse: courseTitle) {
+            return true
+        }
+
+        // 4. An unnumbered single child directory wrapping multiple numbered
+        //    section folders, even if a loose intro/trailer video sits beside them.
+        if childSections.count > 1
+            && !CourseName.hasLeadingIndex(candidateName)
+            && childSections.filter({ CourseName.hasLeadingIndex($0.originalName ?? $0.title) }).count >= 2 {
+            return true
+        }
+
+        return false
+    }
+
     /// Depth-first lesson order shared by the outline and playback queue.
     public static func lessons(in root: TreeNode) -> [TreeNode] {
+        let root = effectiveRoot(of: root)
         var result: [TreeNode] = []
         func visit(_ node: TreeNode) {
             for child in node.orderedNavigableChildren {
@@ -228,6 +408,7 @@ public enum CourseTree {
     }
 
     public static func outline(of root: TreeNode) -> [OutlineEntry] {
+        let root = effectiveRoot(of: root)
         var result: [OutlineEntry] = []
         func appendAssets(_ node: TreeNode, depth: Int) {
             for asset in node.allAssets.sorted(by: { ($0.position ?? 0, $0.id) < ($1.position ?? 0, $1.id) }) {
@@ -255,6 +436,7 @@ public enum CourseTree {
     /// recursively; lessons that sit directly under the root (no enclosing
     /// section) are collected into a single leading synthetic group.
     public static func sectionGroups(of root: TreeNode, progress: CourseProgress) -> [SectionGroup] {
+        let root = effectiveRoot(of: root)
         var groups: [SectionGroup] = []
         var looseLessons: [TreeNode] = []
         for child in root.orderedNavigableChildren {
@@ -271,7 +453,7 @@ public enum CourseTree {
             let completed = looseLessons.filter {
                 progress.progress(for: $0.id)?.isEffectivelyComplete ?? false
             }.count
-            let synthetic = TreeNode(id: "\(root.id)#loose", type: "section", title: root.title)
+            let synthetic = TreeNode(id: "\(root.id)#loose", type: "section", title: CourseName.clean(root.title))
             groups.insert(SectionGroup(section: synthetic,
                                        children: looseLessons.map { .lesson($0) }, resources: [],
                                        completed: completed, total: looseLessons.count,
@@ -308,7 +490,7 @@ public enum CourseTree {
 
     /// Course-level resource files/folders attached directly to the root.
     public static func courseResources(of root: TreeNode) -> [TreeNode] {
-        root.resourceAssets
+        effectiveRoot(of: root).resourceAssets
     }
 
     /// Number of leaf files beneath a resource node (folders recurse into

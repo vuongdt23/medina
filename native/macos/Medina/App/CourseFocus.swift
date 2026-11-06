@@ -57,11 +57,11 @@ struct CourseFocus: View {
             .keyboardShortcut("[", modifiers: .command)
             .help("Back to Library (⌘[)")
 
-            Text(model.tree?.title ?? "Loading…")
+            Text(model.tree.map { CourseName.clean($0.title) } ?? "Loading…")
                 .font(.system(size: 14, weight: .semibold))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .help(model.tree?.title ?? "")
+                .help(model.tree?.originalName ?? model.tree?.title ?? "")
 
             if let playing = model.lessonQueue?.current,
                model.selectedItemID != playing.id {

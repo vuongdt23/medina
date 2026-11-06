@@ -34,3 +34,44 @@ func TestDottedDirectoryTitlesPreserveNames(t *testing.T) {
 		t.Fatalf("missing items: %v", want)
 	}
 }
+
+func TestUnderscoreSubtitleAndCompactNumericPrefixes(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"Course/01-Welcome/001 Welcome to Data Engineering Essentials.mp4":    "video",
+		"Course/01-Welcome/001 Welcome to Data Engineering Essentials_en.srt": "subtitle",
+		"Course/02_Architecture/01_Overview.mp4":                              "video",
+	}
+	for rel, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Item{}
+	for _, it := range result.Items {
+		byName[it.OriginalName] = it
+	}
+	if got := byName["01-Welcome"].Title; got != "Welcome" {
+		t.Errorf("01-Welcome title = %q, want Welcome", got)
+	}
+	if got := byName["02_Architecture"].Title; got != "Architecture" {
+		t.Errorf("02_Architecture title = %q, want Architecture", got)
+	}
+	if got := byName["01_Overview.mp4"].Title; got != "Overview" {
+		t.Errorf("01_Overview.mp4 title = %q, want Overview", got)
+	}
+	lesson := byName["001 Welcome to Data Engineering Essentials.mp4"]
+	sub := byName["001 Welcome to Data Engineering Essentials_en.srt"]
+	if sub.LessonID != lesson.ID || sub.SubtitleFor != lesson.ID || sub.ParentID != lesson.ID {
+		t.Fatalf("underscore subtitle not associated with lesson: sub=%+v lesson=%+v", sub, lesson)
+	}
+}
+
