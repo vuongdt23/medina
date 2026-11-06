@@ -110,8 +110,13 @@ public final class VLCPlaybackEngine {
     public var isSeekable: Bool { player.isSeekable }
     public var volume: Float { player.volume }
     public var isMuted: Bool { player.isMuted }
+    /// libVLC cache fullness, 0...1. This is buffer *health* (how full the
+    /// read-ahead cache is right now), not a buffered timeline position —
+    /// libVLC's HTTP/prefetch input does not expose an absolute buffered-to
+    /// timestamp.
+    public var bufferFill: Double { Double(max(0, min(100, player.bufferFill))) / 100 }
 
-    public func load(url: URL, title: String, subtitles: [PlaybackSubtitle], resumeAt: Double = 0) {
+    public func load(url: URL, title: String, subtitles: [PlaybackSubtitle], resumeAt: Double = 0, prefetchBufferBytes: Int = 1 << 30) {
         cancelSessionTasks()
         activeGeneration = nil
         self.title = title
@@ -127,14 +132,16 @@ public final class VLCPlaybackEngine {
         let statuses = player.playbackStatus
         do {
             let media = try Media(url: url)
-            // Our server streams ordinary HTTP files. A modest prebuffer keeps
-            // libVLC from immediately starving when the initial connection is
-            // slower than the media bitrate, while still allowing range seeks.
-            // VLC refills this entire buffer after every seek, so an oversized
-            // value turns each scrub/skip into a multi-second stall. 1500ms
-            // gives a Tailscale/WAN link enough headroom against latency jitter
-            // without punishing seeks.
+            // A modest time-based prebuffer keeps libVLC from starving when the
+            // initial connection is slower than the media bitrate. VLC refills
+            // it after every seek, so it stays small (1.5s) to keep seeks snappy.
             media.addOption(":network-caching=1500")
+            // The prefetch stream filter reads ahead into a byte-sized cache.
+            // A large buffer lets VLC pull far ahead of playback over a laggy
+            // link; prefetch-read-size activates the filter for this input.
+            let prefetch = max(1 << 20, prefetchBufferBytes)
+            media.addOption(":prefetch-buffer-size=\(prefetch)")
+            media.addOption(":prefetch-read-size=\(min(prefetch, 1 << 20))")
             for subtitle in subtitles {
                 do { try media.addSlave(from: subtitle.url, type: .subtitle) }
                 catch { /* A missing or unsupported sidecar must not block the lesson. */ }
@@ -384,6 +391,8 @@ public final class PlaybackSession {
     public var duration: Double { vlcEngine?.duration ?? 0 }
     public var knownDuration: Double? { vlcEngine?.knownDuration }
     public var isSeekable: Bool { vlcEngine?.isSeekable ?? false }
+    /// libVLC cache fullness, 0...1 (buffer health, not a timeline position).
+    public var bufferFill: Double { vlcEngine?.bufferFill ?? 0 }
     public var playbackSpeed: Float { vlcEngine?.playbackSpeed ?? speedPreference }
     public var volume: Float { vlcEngine?.volume ?? volumePreference }
     public var isMuted: Bool { vlcEngine?.isMuted ?? mutePreference }
@@ -394,10 +403,10 @@ public final class PlaybackSession {
         (vlcEngine?.subtitleTracks ?? []).map { PlaybackTrack(id: $0.id, title: $0.name, language: $0.language) }
     }
 
-    public func load(url: URL, title: String, subtitles: [PlaybackSubtitle] = [], resumeAt: Double = 0) {
+    public func load(url: URL, title: String, subtitles: [PlaybackSubtitle] = [], resumeAt: Double = 0, prefetchBufferBytes: Int = 1 << 30) {
         self.title = title
         let engine = ensureVLC()
-        engine.load(url: url, title: title, subtitles: subtitles, resumeAt: resumeAt)
+        engine.load(url: url, title: title, subtitles: subtitles, resumeAt: resumeAt, prefetchBufferBytes: prefetchBufferBytes)
         engine.setSpeed(speedPreference)
         engine.setVolume(volumePreference)
         if engine.isMuted != mutePreference { engine.toggleMute() }

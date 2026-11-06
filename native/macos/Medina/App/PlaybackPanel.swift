@@ -121,18 +121,21 @@ struct PlaybackPanel: View {
         VStack {
             Spacer()
             VStack(spacing: 8) {
-                Slider(value: playbackPosition, in: 0...max(engine.duration, 1), onEditingChanged: { editing in
-                    if !editing, let target = scrubPosition {
-                        // Submitting every drag sample overwhelms libVLC's
-                        // serialized seek queue and can leave it at EOF. Keep
-                        // the thumb responsive locally, then make one exact
-                        // seek when the user releases it.
-                        engine.seek(to: target)
-                        scrubPosition = nil
-                    }
-                })
-                    .disabled(!engine.isSeekable || (engine.knownDuration ?? 0) <= 0)
-                    .accessibilityLabel("Playback position")
+                ZStack(alignment: .leading) {
+                    bufferHealthTrack
+                    Slider(value: playbackPosition, in: 0...max(engine.duration, 1), onEditingChanged: { editing in
+                        if !editing, let target = scrubPosition {
+                            // Submitting every drag sample overwhelms libVLC's
+                            // serialized seek queue and can leave it at EOF. Keep
+                            // the thumb responsive locally, then make one exact
+                            // seek when the user releases it.
+                            engine.seek(to: target)
+                            scrubPosition = nil
+                        }
+                    })
+                        .disabled(!engine.isSeekable || (engine.knownDuration ?? 0) <= 0)
+                        .accessibilityLabel("Playback position")
+                }
                 if compact {
                     compactVLCTransport
                 } else {
@@ -157,6 +160,29 @@ struct PlaybackPanel: View {
             },
             set: { scrubPosition = $0 }
         )
+    }
+
+    /// A thin bar under the scrubber showing libVLC's read-ahead cache health:
+    /// a lighter segment extends ahead of the playhead by the cache fill
+    /// fraction of the remaining timeline. This is buffer *health*, not an
+    /// absolute buffered-to position (libVLC does not expose that).
+    private var bufferHealthTrack: some View {
+        GeometryReader { geo in
+            let total = max(engine.duration, 1)
+            let played = min(1, max(0, (scrubPosition ?? engine.currentTime) / total))
+            let remaining = max(0, 1 - played)
+            let aheadFraction = remaining * engine.bufferFill
+            let width = geo.size.width
+            Capsule()
+                .fill(.white.opacity(0.28))
+                .frame(width: width * aheadFraction, height: 3)
+                .offset(x: width * played)
+                .animation(.easeOut(duration: 0.3), value: aheadFraction)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .frame(height: 3)
+        .opacity(engine.state == .playing || engine.state == .loading ? 1 : 0)
     }
 
     private var compactVLCTransport: some View {

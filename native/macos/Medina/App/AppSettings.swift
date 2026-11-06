@@ -22,6 +22,20 @@ final class AppSettings {
     var persistentLoggingEnabled: Bool {
         didSet { defaults.set(persistentLoggingEnabled, forKey: "persistentLoggingEnabled") }
     }
+    /// libVLC prefetch read-ahead buffer, in megabytes, applied on the next
+    /// lesson load. A larger buffer lets VLC pull far ahead of playback over a
+    /// laggy link, at the cost of RAM. The Settings slider constrains input to
+    /// 16...1024 MB; `prefetchBufferBytes` is the value handed to libVLC.
+    ///
+    /// The didSet only persists — it must not reassign the property. Under
+    /// @Observable this is a synthesized computed property, so a self-write
+    /// inside its own didSet re-enters the setter and recurses until the
+    /// stack overflows.
+    var prefetchBufferMB: Int {
+        didSet { defaults.set(prefetchBufferMB, forKey: "prefetchBufferMB") }
+    }
+    /// The prefetch buffer clamped to a safe range and converted to bytes.
+    var prefetchBufferBytes: Int { min(1024, max(16, prefetchBufferMB)) * (1 << 20) }
 
     var logFileURL: URL {
         logDirectoryURL.appendingPathComponent("medina.log", isDirectory: false)
@@ -35,6 +49,7 @@ final class AppSettings {
         loggingEnabled = defaults.object(forKey: "loggingEnabled") as? Bool ?? true
         minimumLogLevel = AppLogLevel(rawValue: defaults.string(forKey: "minimumLogLevel") ?? "info") ?? .info
         persistentLoggingEnabled = defaults.bool(forKey: "persistentLoggingEnabled")
+        prefetchBufferMB = min(1024, max(16, defaults.object(forKey: "prefetchBufferMB") as? Int ?? 1024))
     }
 
     func logDebug(_ message: String, category: String = "app") {
@@ -105,6 +120,27 @@ struct AppSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Playback") {
+                LabeledContent("Read-ahead buffer") {
+                    Text(Self.formatMB(settings.prefetchBufferMB))
+                        .font(.body.monospacedDigit())
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(settings.prefetchBufferMB) },
+                        set: { settings.prefetchBufferMB = Int($0.rounded()) }
+                    ),
+                    in: 16...1024, step: 16
+                ) {
+                    Text("Read-ahead buffer")
+                } minimumValueLabel: {
+                    Text("16 MB").font(.caption2).foregroundStyle(.secondary)
+                } maximumValueLabel: {
+                    Text("1 GB").font(.caption2).foregroundStyle(.secondary)
+                }
+                Text("How much libVLC reads ahead of playback into memory. A larger buffer pulls further ahead on slow or high-latency links so playback is less likely to stall, at the cost of RAM. Applies to the next lesson you open. Default 1 GB.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Logging") {
                 Toggle("Enable app logging", isOn: $settings.loggingEnabled)
                 Picker("Minimum level", selection: $settings.minimumLogLevel) {
@@ -130,6 +166,10 @@ struct AppSettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
-        .frame(width: 500, height: 470)
+        .frame(width: 500, height: 560)
+    }
+
+    private static func formatMB(_ mb: Int) -> String {
+        mb >= 1024 ? String(format: "%.0f GB", Double(mb) / 1024) : "\(mb) MB"
     }
 }

@@ -159,7 +159,8 @@ final class LibraryModel {
             return PlaybackSubtitle(url: client.resolve(path), filename: filename)
         }
         playbackEngine?.load(url: client.resolve(stream), title: lesson.title,
-                             subtitles: subtitles, resumeAt: resumeAt)
+                             subtitles: subtitles, resumeAt: resumeAt,
+                             prefetchBufferBytes: AppSettings.shared.prefetchBufferBytes)
         selectItem(id: lesson.id)
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
@@ -268,7 +269,8 @@ final class LibraryModel {
             let filename = subtitle.originalName ?? (subtitle.title + (subtitle.fileExtension.map { ".\($0)" } ?? ""))
             return PlaybackSubtitle(url: client.resolve(path), filename: filename)
         }
-        playbackEngine?.load(url: client.resolve(stream), title: lesson.title, subtitles: subtitles)
+        playbackEngine?.load(url: client.resolve(stream), title: lesson.title, subtitles: subtitles,
+                             prefetchBufferBytes: AppSettings.shared.prefetchBufferBytes)
         if userInitiated {
             selectItem(id: lesson.id)
         } else {
