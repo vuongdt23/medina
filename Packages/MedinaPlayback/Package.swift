@@ -5,13 +5,12 @@ let package = Package(
     name: "MedinaPlayback",
     platforms: [.macOS(.v15)],
     products: [.library(name: "MedinaPlayback", targets: ["MedinaPlayback"])],
-    dependencies: [
-        .package(url: "https://github.com/harflabs/SwiftVLC.git", exact: "1.1.0-beta.14")
-    ],
+    dependencies: [],
     targets: [
-        .target(name: "MedinaPlayback", dependencies: [
-            .product(name: "SwiftVLC", package: "SwiftVLC")
-        ]),
+        .systemLibrary(name: "CMpvSystem", pkgConfig: "mpv", providers: [.brew(["mpv"])]),
+        .target(name: "CMpvShim", dependencies: ["CMpvSystem"], publicHeadersPath: "include",
+               linkerSettings: [.linkedFramework("OpenGL")]),
+        .target(name: "MedinaPlayback", dependencies: ["CMpvShim", "CMpvSystem"]),
         .testTarget(name: "MedinaPlaybackTests", dependencies: ["MedinaPlayback"])
     ]
 )
