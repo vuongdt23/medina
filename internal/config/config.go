@@ -21,6 +21,9 @@ type Config struct {
 	ScanWorkers          int
 	ScanDirectoryWorkers int
 	DisableWatching      bool
+	ThumbnailsEnabled    bool
+	ThumbnailMaxDim      int
+	ThumbnailCacheDir    string
 }
 
 func Load() (Config, error) {
@@ -90,7 +93,59 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 	}
+	thumbnailEnabled, err := strconv.ParseBool(env("THUMBNAILS", "true"))
+	if err != nil {
+		return Config{}, fmt.Errorf("THUMBNAILS must be true or false")
+	}
+	cfg.ThumbnailsEnabled = thumbnailEnabled
+	if cfg.ThumbnailMaxDim, err = strconv.Atoi(env("THUMBNAIL_MAX_DIM", "320")); err != nil || cfg.ThumbnailMaxDim < 16 || cfg.ThumbnailMaxDim > 4096 {
+		return Config{}, fmt.Errorf("THUMBNAIL_MAX_DIM must be an integer between 16 and 4096")
+	}
+	cacheDir := env("THUMBNAIL_CACHE_DIR", filepath.Join(filepath.Dir(cfg.DatabasePath), "thumbnails"))
+	if !filepath.IsAbs(cacheDir) {
+		cacheDir, err = filepath.Abs(cacheDir)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	cacheDir, err = resolveFuturePath(cacheDir)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve THUMBNAIL_CACHE_DIR: %w", err)
+	}
+	if rel, relErr := filepath.Rel(cfg.ContentRoot, cacheDir); relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return Config{}, fmt.Errorf("THUMBNAIL_CACHE_DIR must be outside CONTENT_ROOT")
+	}
+	cfg.ThumbnailCacheDir = cacheDir
 	return cfg, nil
+}
+
+func resolveFuturePath(path string) (string, error) {
+	path, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	current := path
+	var suffix []string
+	for {
+		if _, statErr := os.Lstat(current); statErr == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no existing parent for %s", path)
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 func env(key, fallback string) string {

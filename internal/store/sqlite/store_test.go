@@ -4,9 +4,69 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"medina/internal/scanner"
 )
+
+func TestFailedFirstScanKeepsPartialSearchIndex(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	course := filepath.Join(root, "Course")
+	if err := os.MkdirAll(course, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "Partial Lesson.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "partial-search.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.EnsureLibrary(ctx, "library_default", "Test", root); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.ScanWithProgress(ctx, "library_default", root, func(int) error { return fmt.Errorf("stop after persisting partial batch") })
+	if err == nil {
+		t.Fatal("expected interrupted scan")
+	}
+	hits, err := store.SearchEntries(ctx, "library_default", PrefixQuery("partial"), "lesson", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Title != "Partial Lesson" {
+		t.Fatalf("partial scan search index lost entries: %+v", hits)
+	}
+}
+
+func TestGenerateWebPThumbnailWhenToolsAreAvailable(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil || !ThumbnailToolsAvailable() {
+		t.Skip("ffmpeg and a WebP encoder are optional")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "cover.png")
+	if err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=32x16:d=0.1", "-frames:v", "1", "-y", source).Run(); err != nil {
+		t.Skipf("ffmpeg image source generation unavailable: %v", err)
+	}
+	st, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := scanner.Item{ID: "item_thumbnail_test", Type: "asset", OriginalName: "cover.png", RelativePath: "cover.png", SizeBytes: st.Size(), ModifiedAt: st.ModTime(), MimeType: "image/png"}
+	cache := filepath.Join(t.TempDir(), "thumbnails")
+	GenerateThumbnails(context.Background(), root, cache, 320, []scanner.Item{item})
+	thumbnail, err := os.ReadFile(ThumbnailPath(cache, item))
+	if err != nil {
+		t.Fatalf("thumbnail was not generated: %v", err)
+	}
+	if len(thumbnail) < 12 || string(thumbnail[:4]) != "RIFF" || string(thumbnail[8:12]) != "WEBP" {
+		t.Fatalf("thumbnail is not WebP: %x", thumbnail[:min(12, len(thumbnail))])
+	}
+}
 
 func TestScanPersistsDiscoveredBatchesBeforeCompletion(t *testing.T) {
 	ctx := context.Background()

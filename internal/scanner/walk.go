@@ -14,10 +14,13 @@ import (
 // Observers run serially on the traversal goroutine, even when filesystem
 // operations overlap. Workers limits metadata requests across the entire scan.
 type Options struct {
-	Workers          int
-	DirectoryWorkers int
-	OnProgress       func(Progress)
-	OnDirectory      func(string)
+	Workers            int
+	DirectoryWorkers   int
+	OnProgress         func(Progress)
+	OnDirectory        func(string)
+	GenerateThumbnails bool
+	ThumbnailCacheDir  string
+	ThumbnailMaxDim    int
 }
 
 type Progress struct {

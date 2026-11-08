@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net"
@@ -12,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,13 +28,16 @@ import (
 )
 
 type Server struct {
-	cfg        config.Config
-	store      *sqlite.Store
-	logger     *slog.Logger
-	mux        *http.ServeMux
-	libraryID  string
-	submitScan func(string) bool
+	cfg            config.Config
+	store          *sqlite.Store
+	logger         *slog.Logger
+	mux            *http.ServeMux
+	libraryID      string
+	submitScan     func(string) bool
+	thumbnailReady bool
 }
+
+var searchTokenPattern = regexp.MustCompile(`[\pL\pN_]+`)
 
 func New(cfg config.Config, store *sqlite.Store, logger *slog.Logger) (*Server, error) {
 	canonicalRoot, err := filepath.EvalSymlinks(cfg.ContentRoot)
@@ -38,7 +45,14 @@ func New(cfg config.Config, store *sqlite.Store, logger *slog.Logger) (*Server, 
 		return nil, fmt.Errorf("resolve content root: %w", err)
 	}
 	cfg.ContentRoot = canonicalRoot
-	s := &Server{cfg: cfg, store: store, logger: logger, mux: http.NewServeMux(), libraryID: "library_default"}
+	if cfg.ThumbnailCacheDir == "" {
+		cfg.ThumbnailCacheDir = filepath.Join(filepath.Dir(cfg.DatabasePath), "thumbnails")
+		cfg.ThumbnailsEnabled = true // zero-value Configs retain the documented default
+	}
+	if cfg.ThumbnailMaxDim <= 0 {
+		cfg.ThumbnailMaxDim = 320
+	}
+	s := &Server{cfg: cfg, store: store, logger: logger, mux: http.NewServeMux(), libraryID: "library_default", thumbnailReady: cfg.ThumbnailsEnabled && sqlite.ThumbnailToolsAvailable()}
 	if err := store.EnsureLibrary(context.Background(), s.libraryID, cfg.LibraryName, cfg.ContentRoot); err != nil {
 		return nil, err
 	}
@@ -144,7 +158,7 @@ func (s *Server) routes() {
 	})
 	s.mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"status": "ok"}) })
 	s.mux.HandleFunc("GET /api/v1/system/info", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"name": "Medina", "version": "0.1.0", "apiVersion": "1", "capabilities": map[string]bool{"authentication": false, "transcoding": false, "progress": true, "fileWatching": !s.cfg.DisableWatching, "thumbnails": false}})
+		writeJSON(w, 200, map[string]any{"name": "Medina", "version": "0.1.0", "apiVersion": "1", "capabilities": map[string]bool{"authentication": false, "transcoding": false, "progress": true, "fileWatching": !s.cfg.DisableWatching, "thumbnails": s.thumbnailReady}})
 	})
 	s.mux.HandleFunc("GET /api/v1/index/status", func(w http.ResponseWriter, r *http.Request) {
 		v, e := s.store.Status(r.Context(), s.libraryID)
@@ -170,15 +184,39 @@ func (s *Server) routes() {
 			writeError(w, 404, "item_not_found", "Library not found.")
 			return
 		}
-		items, e := s.store.Courses(r.Context(), s.libraryID)
+		courseItems, e := s.store.Courses(r.Context(), s.libraryID)
 		if e != nil {
 			writeError(w, 500, "internal_error", "Could not read indexed items.")
 			return
 		}
+		profile := profileID(r)
+		var profileProgress []sqlite.LessonProgress
+		if profile != "" {
+			profileProgress, e = s.store.AllLessonProgress(r.Context(), s.libraryID, profile)
+			if e != nil {
+				writeError(w, 500, "internal_error", "Could not read lesson progress.")
+				return
+			}
+		}
+		metadataItems := courseItems
+		if profile != "" || s.thumbnailReady {
+			metadataItems, e = s.items(r)
+			if e != nil {
+				writeError(w, 500, "internal_error", "Could not read indexed items.")
+				return
+			}
+		}
 		var courses []map[string]any
-		for _, it := range items {
+		for _, it := range courseItems {
 			if it.Type == "course" {
-				courses = append(courses, map[string]any{"id": it.ID, "title": it.Title, "originalName": it.OriginalName, "position": it.Position})
+				entry := map[string]any{"id": it.ID, "title": it.Title, "originalName": it.OriginalName, "position": it.Position}
+				if url := s.courseThumbnail(metadataItems, it.ID); url != "" {
+					entry["thumbnailUrl"] = url
+				}
+				if profile != "" {
+					entry["progress"] = courseSummary(metadataItems, it.ID, profileProgress)
+				}
+				courses = append(courses, entry)
 			}
 		}
 		limit := 100
@@ -224,12 +262,30 @@ func (s *Server) routes() {
 		}
 		for _, it := range items {
 			if it.ID == r.PathValue("courseID") && it.Type == "course" {
-				writeJSON(w, 200, map[string]any{"id": it.ID, "type": it.Type, "title": it.Title, "originalName": it.OriginalName, "position": it.Position, "mimeType": it.MimeType})
+				entry := map[string]any{"id": it.ID, "type": it.Type, "title": it.Title, "originalName": it.OriginalName, "position": it.Position, "mimeType": it.MimeType}
+				if url := s.courseThumbnail(items, it.ID); url != "" {
+					entry["thumbnailUrl"] = url
+				}
+				if profile := profileID(r); profile != "" {
+					records, err := s.store.AllLessonProgress(r.Context(), s.libraryID, profile)
+					if err != nil {
+						writeError(w, 500, "internal_error", "Could not read lesson progress.")
+						return
+					}
+					entry["progress"] = courseSummary(items, it.ID, records)
+				}
+				writeJSON(w, 200, entry)
 				return
 			}
 		}
 		writeError(w, 404, "item_not_found", "Course not found.")
 	})
+	s.mux.HandleFunc("GET /api/v1/lessons/{itemID}/thumbnail", s.thumbnail)
+	s.mux.HandleFunc("HEAD /api/v1/lessons/{itemID}/thumbnail", s.thumbnail)
+	s.mux.HandleFunc("GET /api/v1/assets/{itemID}/thumbnail", s.thumbnail)
+	s.mux.HandleFunc("HEAD /api/v1/assets/{itemID}/thumbnail", s.thumbnail)
+	s.mux.HandleFunc("GET /api/v1/search", s.search)
+	s.mux.HandleFunc("GET /api/v1/progress/recent", s.recentProgress)
 	s.mux.HandleFunc("GET /api/v1/courses/{courseID}/tree", s.courseTree)
 	s.mux.HandleFunc("GET /api/v1/courses/{courseID}/progress", s.courseProgress)
 	s.mux.HandleFunc("PUT /api/v1/lessons/{itemID}/progress", s.putLessonProgress)
@@ -280,6 +336,16 @@ func (s *Server) courseTree(w http.ResponseWriter, r *http.Request) {
 			lessonCount++
 		}
 		obj := map[string]any{"id": it.ID, "type": it.Type, "title": it.Title, "originalName": it.OriginalName, "position": it.Position, "mimeType": it.MimeType, "extension": it.Extension, "sizeBytes": it.SizeBytes}
+		if it.Type == "lesson" || it.Type == "asset" {
+			if url := s.thumbnailURL(it); url != "" {
+				obj["thumbnailUrl"] = url
+			}
+		}
+		if it.Type == "course" {
+			if url := s.courseThumbnail(items, it.ID); url != "" {
+				obj["thumbnailUrl"] = url
+			}
+		}
 		if it.Type == "subtitle" {
 			obj["contentUrl"] = "/api/v1/assets/" + it.ID + "/content"
 		}
@@ -345,6 +411,289 @@ func (s *Server) courseTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, tree)
 }
 
+func (s *Server) thumbnailURL(item scanner.Item) string {
+	if !s.thumbnailReady || !thumbnailable(item) {
+		return ""
+	}
+	if item.Type != "lesson" && item.Type != "asset" {
+		return ""
+	}
+	path := sqlite.ThumbnailPath(s.cfg.ThumbnailCacheDir, item)
+	if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	if item.Type == "lesson" {
+		return "/api/v1/lessons/" + item.ID + "/thumbnail"
+	}
+	return "/api/v1/assets/" + item.ID + "/thumbnail"
+}
+
+func thumbnailable(item scanner.Item) bool {
+	if item.Type == "lesson" {
+		return item.MediaKind == "video"
+	}
+	if item.Type != "asset" || activeDocument(item.MimeType, filepath.Ext(item.OriginalName)) {
+		return false
+	}
+	return rasterImage(mediaType(item.MimeType)) || imageExtensions[strings.ToLower(filepath.Ext(item.OriginalName))]
+}
+
+func (s *Server) courseThumbnail(items []scanner.Item, courseID string) string {
+	children := make(map[string][]scanner.Item)
+	for _, item := range items {
+		children[item.ParentID] = append(children[item.ParentID], item)
+	}
+	for parent := range children {
+		sort.Slice(children[parent], func(i, j int) bool { return children[parent][i].Position < children[parent][j].Position })
+	}
+	var first func(string) string
+	first = func(parent string) string {
+		for _, child := range children[parent] {
+			if child.Type == "lesson" {
+				if url := s.thumbnailURL(child); url != "" {
+					return url
+				}
+			}
+			if child.Type == "section" {
+				if url := first(child.ID); url != "" {
+					return url
+				}
+			}
+		}
+		return ""
+	}
+	return first(courseID)
+}
+
+func percent(completed, total int) int {
+	if total == 0 {
+		return 0
+	}
+	return (completed*100 + total/2) / total
+}
+
+func courseSummary(items []scanner.Item, courseID string, records []sqlite.LessonProgress) map[string]int {
+	ids := lessonIDsUnder(items, courseID)
+	completed := 0
+	for _, record := range records {
+		if ids[record.ItemID] && record.Completed {
+			completed++
+		}
+	}
+	return map[string]int{"completedCount": completed, "totalCount": len(ids), "percent": percent(completed, len(ids))}
+}
+
+func (s *Server) thumbnail(w http.ResponseWriter, r *http.Request) {
+	if !s.thumbnailReady {
+		writeError(w, 404, "item_not_found", "Thumbnail not found.")
+		return
+	}
+	id := r.PathValue("itemID")
+	items, err := s.items(r)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not resolve thumbnail.")
+		return
+	}
+	wantedType := "asset"
+	if strings.HasPrefix(r.URL.Path, "/api/v1/lessons/") {
+		wantedType = "lesson"
+	}
+	var item *scanner.Item
+	for i := range items {
+		if items[i].ID == id && items[i].Type == wantedType {
+			item = &items[i]
+			break
+		}
+	}
+	if item == nil || !thumbnailable(*item) {
+		writeError(w, 404, "item_not_found", "Thumbnail not found.")
+		return
+	}
+	path := sqlite.ThumbnailPath(s.cfg.ThumbnailCacheDir, *item)
+	f, err := os.Open(path)
+	if err != nil {
+		writeError(w, 404, "item_not_found", "Thumbnail not found.")
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		writeError(w, 404, "item_not_found", "Thumbnail not found.")
+		return
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, f); err != nil {
+		writeError(w, 500, "internal_error", "Could not read thumbnail.")
+		return
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		writeError(w, 500, "internal_error", "Could not read thumbnail.")
+		return
+	}
+	etag := `"` + hex.EncodeToString(digest.Sum(nil)) + `"`
+	w.Header().Set("Content-Type", "image/webp")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("ETag", etag)
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(path), st.ModTime(), f)
+}
+
+func (s *Server) search(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeError(w, 400, "invalid_request", "q is required.")
+		return
+	}
+	if len(query) > 512 {
+		writeError(w, 400, "invalid_request", "q must be at most 512 bytes.")
+		return
+	}
+	var tokens []string
+	for _, token := range searchTokenPattern.FindAllString(query, -1) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) == 0 {
+		writeJSON(w, 200, map[string]any{"query": query, "items": []any{}})
+		return
+	}
+	entryType := r.URL.Query().Get("type")
+	if entryType != "" && entryType != "lesson" && entryType != "section" && entryType != "course" && entryType != "asset" {
+		writeError(w, 400, "invalid_request", "type must be lesson, section, course, or asset.")
+		return
+	}
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, e := strconv.Atoi(raw)
+		if e != nil || n < 1 {
+			writeError(w, 400, "invalid_request", "limit must be an integer from 1 to 100.")
+			return
+		}
+		limit = min(n, 100)
+	}
+	hits, err := s.store.SearchEntries(r.Context(), s.libraryID, sqlite.PrefixQuery(strings.Join(tokens, " ")), entryType, limit)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not search the library.")
+		return
+	}
+	all, err := s.items(r)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not read indexed items.")
+		return
+	}
+	byID := make(map[string]scanner.Item, len(all))
+	for _, item := range all {
+		byID[item.ID] = item
+	}
+	var out []map[string]any
+	for _, hit := range hits {
+		item, ok := byID[hit.ItemID]
+		if !ok {
+			continue
+		}
+		courseID, coursePath := courseBreadcrumb(all, item.ID)
+		entry := map[string]any{"id": hit.ItemID, "type": hit.Type, "title": hit.Title, "originalName": hit.OriginalName, "courseId": courseID, "coursePath": coursePath}
+		if hit.Type == "lesson" {
+			entry["streamUrl"] = "/api/v1/lessons/" + hit.ItemID + "/content"
+		}
+		thumbnailURL := s.thumbnailURL(item)
+		if hit.Type == "course" {
+			thumbnailURL = s.courseThumbnail(all, item.ID)
+		}
+		if thumbnailURL != "" {
+			entry["thumbnailUrl"] = thumbnailURL
+		}
+		out = append(out, entry)
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	writeJSON(w, 200, map[string]any{"query": query, "items": out})
+}
+
+func courseBreadcrumb(items []scanner.Item, id string) (string, string) {
+	byID := make(map[string]scanner.Item, len(items))
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+	var chain []scanner.Item
+	current := byID[id]
+	for current.ID != "" {
+		if current.Type == "course" || current.Type == "section" {
+			chain = append(chain, current)
+		}
+		current = byID[current.ParentID]
+	}
+	var titles []string
+	courseID := ""
+	for i := len(chain) - 1; i >= 0; i-- {
+		titles = append(titles, chain[i].Title)
+		if chain[i].Type == "course" {
+			courseID = chain[i].ID
+		}
+	}
+	return courseID, strings.Join(titles, " / ")
+}
+
+func (s *Server) recentProgress(w http.ResponseWriter, r *http.Request) {
+	profile := profileID(r)
+	if profile == "" {
+		writeError(w, 400, "invalid_request", "A X-Medina-Profile header is required.")
+		return
+	}
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, e := strconv.Atoi(raw)
+		if e != nil || n < 1 {
+			writeError(w, 400, "invalid_request", "limit must be an integer from 1 to 100.")
+			return
+		}
+		limit = min(n, 100)
+	}
+	include := false
+	if raw := r.URL.Query().Get("includeCompleted"); raw != "" {
+		value, e := strconv.ParseBool(raw)
+		if e != nil {
+			writeError(w, 400, "invalid_request", "includeCompleted must be true or false.")
+			return
+		}
+		include = value
+	}
+	records, err := s.store.RecentLessonProgress(r.Context(), s.libraryID, profile, include, limit)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not retrieve recent progress.")
+		return
+	}
+	items, err := s.items(r)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not read indexed items.")
+		return
+	}
+	byID := make(map[string]scanner.Item, len(items))
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+	var out []map[string]any
+	for _, record := range records {
+		item, ok := byID[record.ItemID]
+		if !ok {
+			continue
+		}
+		courseID, path := courseBreadcrumb(items, item.ID)
+		entry := map[string]any{"itemId": item.ID, "title": item.Title, "courseId": courseID, "coursePath": path, "positionSeconds": record.PositionSeconds, "durationSeconds": record.DurationSeconds, "completed": record.Completed, "updatedAt": record.UpdatedAt.UTC().Format(time.RFC3339Nano), "streamUrl": "/api/v1/lessons/" + item.ID + "/content"}
+		if url := s.thumbnailURL(item); url != "" {
+			entry["thumbnailUrl"] = url
+		}
+		out = append(out, entry)
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	writeJSON(w, 200, map[string]any{"items": out})
+}
+
 // lessonIDsUnder returns the set of lesson item IDs anywhere beneath a course.
 // Progress is only tracked for lessons, so this bounds what a course-progress
 // response may contain.
@@ -376,7 +725,7 @@ func profileID(r *http.Request) string {
 type lessonProgressPayload struct {
 	PositionSeconds float64 `json:"positionSeconds"`
 	DurationSeconds float64 `json:"durationSeconds"`
-	Completed       bool    `json:"completed"`
+	Completed       *bool   `json:"completed"`
 }
 
 func lessonProgressJSON(p sqlite.LessonProgress) map[string]any {
@@ -423,11 +772,34 @@ func (s *Server) putLessonProgress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "item_not_found", "Lesson not found.")
 		return
 	}
+	duration := payload.DurationSeconds
+	if duration <= 0 {
+		for _, item := range items {
+			if item.ID == id {
+				duration = item.DurationSeconds
+				break
+			}
+		}
+	}
+	previous, hasPrevious, err := s.store.LessonProgressFor(r.Context(), s.libraryID, profile, id)
+	if err != nil {
+		writeError(w, 500, "internal_error", "Could not read lesson progress.")
+		return
+	}
+	completed := false
+	if hasPrevious {
+		completed = previous.Completed
+	}
+	if payload.Completed != nil {
+		completed = *payload.Completed
+	} else if duration > 0 && payload.PositionSeconds >= duration*0.95 {
+		completed = true
+	}
 	record := sqlite.LessonProgress{
 		ItemID:          id,
 		PositionSeconds: payload.PositionSeconds,
-		DurationSeconds: payload.DurationSeconds,
-		Completed:       payload.Completed,
+		DurationSeconds: duration,
+		Completed:       completed,
 		UpdatedAt:       time.Now().UTC(),
 	}
 	if err := s.store.UpsertLessonProgress(r.Context(), s.libraryID, profile, record); err != nil {
@@ -492,6 +864,7 @@ func (s *Server) courseProgress(w http.ResponseWriter, r *http.Request) {
 		"lessons":        lessons,
 		"completedCount": completedCount,
 		"totalCount":     len(lessonIDs),
+		"percent":        percent(completedCount, len(lessonIDs)),
 	})
 }
 func (s *Server) preview(w http.ResponseWriter, r *http.Request) {

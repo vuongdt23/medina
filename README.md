@@ -1,6 +1,6 @@
 # Medina
 
-A local course-library server. Medina indexes existing folders in SQLite and provides a web UI for browsing lessons, playing original media, and previewing or downloading supporting files. Your library is never modified.
+A stable, local course-library server. Medina indexes existing folders in SQLite and provides a web UI for browsing lessons, playing original media, and previewing or downloading supporting files. Your library is never modified.
 
 ## Quick start
 
@@ -48,7 +48,7 @@ Use environment variables for local runs, or `.env` with Docker Compose.
 | `CONTENT_ROOT` | required; `/library` in Docker | Library directory visible to the server |
 | `LIBRARY_MOUNT` | `./testdata` | Host library directory, Docker only |
 | `BIND_ADDRESS` | `127.0.0.1:17843` | Server listen address; Docker uses `0.0.0.0:17843` internally |
-| `DATABASE_PATH` | `./data/course-media.sqlite` | Index location; Docker uses `/data/course-media.sqlite` |
+| `DATABASE_PATH` | `./data/course-media.sqlite` | Automatically initialized SQLite index location; Docker uses `/data/course-media.sqlite` |
 | `LIBRARY_NAME` | `Courses` | Display name |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `SCAN_INTERVAL` | `6h` | Periodic full scan |
@@ -56,13 +56,21 @@ Use environment variables for local runs, or `.env` with Docker Compose.
 | `SCAN_DEBOUNCE` | `2s` | Wait after a burst of changes |
 | `SCAN_WORKERS` | `8` | Concurrent metadata reads, 1–64 |
 | `SCAN_DIRECTORY_WORKERS` | `4` | Concurrent directory listings, 1–64 |
+| `THUMBNAILS` | `true` | Generate video lesson and image asset thumbnails when `ffmpeg` and a WebP encoder are available |
+| `THUMBNAIL_MAX_DIM` | `320` | Longest-edge bound in pixels (16–4096) |
+| `THUMBNAIL_CACHE_DIR` | `thumbnails/` beside `DATABASE_PATH` | Disposable thumbnail cache; must be outside `CONTENT_ROOT` |
 
 Medina scans at startup, watches for changes, and periodically reconciles the library. Use **Rescan** in the UI to scan manually. Keep periodic scans enabled for Docker, SMB, or NFS mounts, where filesystem events can be missed.
+
+## Features
+
+Library search, a continue-watching feed, lesson completion with per-course progress, and cached thumbnails for video lessons and image assets are exposed through the API. See the [OpenAPI specification](api/openapi.yaml).
 
 ## Things to know
 
 - **No authentication.** Keep Medina on loopback or a trusted network. Docker publishes the app on host loopback by default.
 - **Lesson durations.** The server uses `ffprobe` to read media duration metadata during indexing and caches it in SQLite, probing only new or changed lessons on later scans. The Docker image includes `ffprobe`; local server runs need it on `PATH` for duration labels.
+- **API features.** Search, continue watching, completion/course progress, and thumbnails are exposed for clients. Thumbnail generation needs `ffmpeg` plus a WebP encoder (`libwebp` in ffmpeg or `cwebp` on `PATH`) and can be disabled with `THUMBNAILS=false`; see [`api/openapi.yaml`](api/openapi.yaml).
 - **No transcoding.** Playback depends on your browser's codec support.
 - **Safe previews.** Source files, common images, and PDFs can be previewed; active documents such as HTML and SVG are download-only.
 - **Folder ZIPs.** Downloads use temporary storage outside the library, cleaned up afterward. Limits: 10,000 files, 2 GiB of source data, and 512 MiB compressed. Leave enough space in the OS temporary directory.

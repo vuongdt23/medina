@@ -34,7 +34,7 @@ RUN case "$BUNDLE_FRONTEND" in \
     && chown -R 65532:65532 /out/data
 
 FROM alpine:3.21
-RUN apk add --no-cache ffmpeg \
+RUN apk add --no-cache ffmpeg libwebp-tools \
     && mkdir -p /data \
     && chown 65532:65532 /data
 WORKDIR /

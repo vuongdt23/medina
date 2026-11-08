@@ -5,6 +5,114 @@ info:
 servers:
   - url: /api/v1
 paths:
+  /search:
+    get:
+      summary: Full-text search of indexed library entries
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+        - in: query
+          name: type
+          schema: { type: string, enum: [lesson, section, course, asset] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Ranked search results from the active scan generation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: { type: string }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        type: { type: string, enum: [lesson, section, course, asset] }
+                        title: { type: string }
+                        originalName: { type: string }
+                        courseId: { type: string }
+                        coursePath: { type: string }
+                        streamUrl: { type: string }
+                        thumbnailUrl: { type: string }
+        '400': { description: Invalid query or filter }
+  /progress/recent:
+    get:
+      summary: Recently played lessons for a client profile
+      parameters:
+        - in: header
+          name: X-Medina-Profile
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - in: query
+          name: includeCompleted
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Recent playback progress joined with active library metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        itemId: { type: string }
+                        title: { type: string }
+                        courseId: { type: string }
+                        coursePath: { type: string }
+                        positionSeconds: { type: number }
+                        durationSeconds: { type: number }
+                        completed: { type: boolean }
+                        updatedAt: { type: string, format: date-time }
+                        streamUrl: { type: string }
+                        thumbnailUrl: { type: string }
+        '400': { description: Missing profile or invalid query }
+  /lessons/{itemID}/thumbnail:
+    get:
+        '200':
+          description: WebP image with strong content ETag and cache headers
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            image/webp:
+              schema: { type: string, format: binary }
+        '304': { description: Thumbnail is unchanged }
+        '404': { description: Thumbnail is not available }
+    head:
+      parameters:
+        - in: path
+          name: itemID
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Thumbnail metadata }
+        '404': { description: Thumbnail is not available }
+  /assets/{itemID}/thumbnail:
+    get:
+        '200':
+          description: WebP image with strong content ETag and cache headers
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            image/webp:
+              schema: { type: string, format: binary }
+        '304': { description: Thumbnail is unchanged }
+        '404': { description: Thumbnail is not available }
   /health:
     get:
       responses:
@@ -12,7 +120,7 @@ paths:
   /system/info:
     get:
       responses:
-        '200': { description: Service capabilities }
+        '200': { description: Service capabilities; thumbnails is true only when generation is enabled and ffmpeg plus a WebP encoder are available }
   /index/status:
     get:
       responses:
@@ -57,19 +165,29 @@ paths:
         '200': { description: Configured libraries }
   /libraries/{libraryID}/courses:
     get:
+      description: Course entries include derived per-profile progress and a thumbnailUrl when available. X-Medina-Profile is optional.
       parameters:
         - in: path
           name: libraryID
           required: true
           schema: { type: string }
+        - in: header
+          name: X-Medina-Profile
+          required: false
+          schema: { type: string }
       responses:
         '200': { description: Courses }
   /courses/{courseID}:
     get:
+      description: Course metadata includes per-profile progress and thumbnailUrl when available. X-Medina-Profile is optional.
       parameters:
         - in: path
           name: courseID
           required: true
+          schema: { type: string }
+        - in: header
+          name: X-Medina-Profile
+          required: false
           schema: { type: string }
       responses:
         '200': { description: Course metadata }
@@ -81,11 +199,11 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: Recursive course tree; lesson nodes include durationSeconds when media metadata is available }
+        '200': { description: Recursive course tree; lesson and image asset nodes expose thumbnailUrl when available, and lesson nodes include durationSeconds when media metadata is available }
   /courses/{courseID}/progress:
     get:
       summary: Aggregate lesson progress for a course
-      description: Per-profile playback progress for every lesson beneath the course. Requires an X-Medina-Profile header identifying the client; the server has no user accounts.
+      description: Per-profile playback progress for every lesson beneath the course. The response includes completedCount, totalCount, and percent. Requires an X-Medina-Profile header identifying the client; the server has no user accounts.
       parameters:
         - in: path
           name: courseID
@@ -115,6 +233,7 @@ paths:
                         updatedAt: { type: string, format: date-time }
                   completedCount: { type: integer }
                   totalCount: { type: integer }
+                  percent: { type: integer, minimum: 0, maximum: 100 }
         '400': { description: Missing X-Medina-Profile header }
         '404': { description: Course not found }
   /lessons/{itemID}/progress:
@@ -135,7 +254,7 @@ paths:
         '400': { description: Missing X-Medina-Profile header }
     put:
       summary: Store playback progress for one lesson
-      description: Upserts the per-profile progress record. Duration is reported by the client; indexed lesson nodes may also include durationSeconds from server-side media metadata. Requires an X-Medina-Profile header.
+      description: Upserts per-profile playback progress. Completion becomes sticky when explicitly marked or playback reaches 95% of duration; it remains sticky unless completed:false is explicitly sent. Requires an X-Medina-Profile header.
       parameters:
         - in: path
           name: itemID

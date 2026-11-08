@@ -67,9 +67,12 @@ func main() {
 		logger.Info("content scan started", "root", cfg.ContentRoot, "reason", reason)
 		lastProgressLog := time.Now()
 		generation, scanErr := store.ScanWithOptions(scanCtx, "library_default", cfg.ContentRoot, scanner.Options{
-			Workers:          cfg.ScanWorkers,
-			DirectoryWorkers: cfg.ScanDirectoryWorkers,
-			OnDirectory:      func(path string) { monitor.WatchDirectory(path) },
+			Workers:            cfg.ScanWorkers,
+			DirectoryWorkers:   cfg.ScanDirectoryWorkers,
+			GenerateThumbnails: cfg.ThumbnailsEnabled,
+			ThumbnailCacheDir:  cfg.ThumbnailCacheDir,
+			ThumbnailMaxDim:    cfg.ThumbnailMaxDim,
+			OnDirectory:        func(path string) { monitor.WatchDirectory(path) },
 			OnProgress: func(p scanner.Progress) {
 				if time.Since(lastProgressLog) >= 5*time.Second {
 					logger.Debug("scan progress", "reason", reason, "phase", p.Phase, "operation", p.CurrentOperation, "active_directory_reads", p.ActiveDirectoryReads, "active_metadata_reads", p.ActiveMetadataReads, "directories_read", p.DirectoriesRead, "entries_visited", p.EntriesVisited, "current_directory", p.CurrentDirectory, "duration_ms", p.ElapsedMS, "enumeration_ms", p.EnumerationMS, "metadata_ms", p.MetadataMS, "persistence_ms", p.PersistenceMS)

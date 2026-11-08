@@ -43,6 +43,7 @@ func Open(path string) (*Store, error) {
 	}
 	return s, nil
 }
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.DB.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"); err != nil {
 		return err
@@ -194,6 +195,10 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 			tx.Rollback()
 			return "", err
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO entry_search(item_id,generation_id,entry_type,title,original_name) SELECT item_id,generation_id,entry_type,title,original_name FROM entry_snapshots WHERE generation_id=?`, generation); err != nil {
+			tx.Rollback()
+			return "", err
+		}
 	}
 	// Publish the in-progress generation immediately. Scanner batches are
 	// committed as they are discovered, so readers can query partial scan state.
@@ -211,6 +216,7 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 			// entries, matching Jellyfin's incremental behavior.
 			if previous.Valid {
 				_, _ = s.DB.ExecContext(context.Background(), "UPDATE library_roots SET active_generation_id=?,scan_state='failed',last_scan_error=? WHERE id=?", previous.String, retErr.Error(), libraryID)
+				_, _ = s.DB.ExecContext(context.Background(), "DELETE FROM entry_search WHERE generation_id=?", generation)
 			} else {
 				_, _ = s.DB.ExecContext(context.Background(), "UPDATE library_roots SET scan_state='failed',last_scan_error=? WHERE id=?", retErr.Error(), libraryID)
 			}
@@ -260,6 +266,9 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 		return "", err
 	}
 	probeMissingLessonDurations(ctx, root, result.Items, baselineItems)
+	if options.GenerateThumbnails {
+		GenerateThumbnails(ctx, root, options.ThumbnailCacheDir, options.ThumbnailMaxDim, result.Items)
+	}
 	var durationUpdates []scanner.Item
 	for _, item := range result.Items {
 		if item.Type == "lesson" && item.DurationSeconds > 0 {
@@ -311,6 +320,9 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 	}
 	rows.Close()
 	for _, path := range stale {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM entry_search WHERE item_id=(SELECT item_id FROM entry_snapshots WHERE generation_id=? AND relative_path=?) AND generation_id=?", generation, path, generation); err != nil {
+			return "", err
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM entry_snapshots WHERE generation_id=? AND relative_path=?", generation, path); err != nil {
 			return "", err
 		}
@@ -323,6 +335,9 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 	}
 	// Retain only the current completed generation after publication; otherwise
 	// each periodic reconciliation would duplicate the whole snapshot forever.
+	if _, err = tx.ExecContext(ctx, "DELETE FROM entry_search WHERE generation_id IN (SELECT id FROM scan_generations WHERE library_id=? AND id<>?)", libraryID, generation); err != nil {
+		return "", err
+	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM scan_generations WHERE library_id=? AND id<>?", libraryID, generation); err != nil {
 		return "", err
 	}
@@ -400,12 +415,18 @@ func (s *Store) writeScanBatch(ctx context.Context, libraryID, generation string
 				if _, err := tx.ExecContext(ctx, "UPDATE entry_snapshots SET subtitle_for=? WHERE generation_id=? AND subtitle_for=?", it.ID, generation, replacedID); err != nil {
 					return err
 				}
+				if _, err := tx.ExecContext(ctx, "DELETE FROM entry_search WHERE generation_id=? AND item_id=?", generation, replacedID); err != nil {
+					return err
+				}
 				if _, err := tx.ExecContext(ctx, "DELETE FROM entry_snapshots WHERE generation_id=? AND item_id=?", generation, replacedID); err != nil {
 					return err
 				}
 			}
 		}
-		_, err := exec(`INSERT INTO entry_snapshots(generation_id,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available,duration_seconds)
+		if _, err := exec("DELETE FROM entry_search WHERE item_id=? AND generation_id=?", it.ID, generation); err != nil {
+			return err
+		}
+		_, err = exec(`INSERT INTO entry_snapshots(generation_id,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available,duration_seconds)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(generation_id,item_id) DO UPDATE SET
 				parent_item_id=excluded.parent_item_id,entry_type=excluded.entry_type,
@@ -418,6 +439,9 @@ func (s *Store) writeScanBatch(ctx context.Context, libraryID, generation string
 			it.SortKey, it.Position, it.Depth, it.SizeBytes, it.ModifiedAt.UTC().Format(time.RFC3339Nano),
 			it.MimeType, it.Extension, it.MediaKind, nullIfEmpty(it.LessonID), nullIfEmpty(it.SubtitleFor), it.Available, it.DurationSeconds)
 		if err != nil {
+			return err
+		}
+		if _, err := exec(`INSERT INTO entry_search(item_id,generation_id,entry_type,title,original_name) VALUES(?,?,?,?,?)`, it.ID, generation, it.Type, it.Title, it.OriginalName); err != nil {
 			return err
 		}
 	}

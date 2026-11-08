@@ -15,8 +15,214 @@ import (
 	"testing"
 
 	"medina/internal/config"
+	"medina/internal/scanner"
 	"medina/internal/store/sqlite"
 )
+
+func TestThumbnailEndpointServesCachedAssetWithValidators(t *testing.T) {
+	root := t.TempDir()
+	course := filepath.Join(root, "Images")
+	if err := os.MkdirAll(course, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "cover.png"), []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "intro.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "thumbnail.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cache := filepath.Join(t.TempDir(), "cache")
+	server, err := New(config.Config{BindAddress: "127.0.0.1:0", ContentRoot: root, LibraryName: "Test", ThumbnailCacheDir: cache, ThumbnailsEnabled: true}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.thumbnailReady = true
+	if _, err = store.Scan(context.Background(), "library_default", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Items(context.Background(), "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var image scanner.Item
+	var lesson scanner.Item
+	var courseID string
+	for _, item := range items {
+		if item.Type == "asset" {
+			image = item
+		}
+		if item.Type == "lesson" {
+			lesson = item
+		}
+		if item.Type == "course" {
+			courseID = item.ID
+		}
+	}
+	if image.ID == "" || lesson.ID == "" {
+		t.Fatal("image asset not indexed")
+	}
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sqlite.ThumbnailPath(cache, image), []byte("fake-webp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sqlite.ThumbnailPath(cache, lesson), []byte("lesson-webp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/assets/" + image.ID + "/thumbnail"
+	get := httptest.NewRecorder()
+	server.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, path, nil))
+	if get.Code != 200 || get.Header().Get("Content-Type") != "image/webp" || get.Body.String() != "fake-webp" || get.Header().Get("ETag") == "" || get.Header().Get("Cache-Control") == "" {
+		t.Fatalf("thumbnail response: status=%d headers=%v body=%q", get.Code, get.Header(), get.Body.String())
+	}
+	conditional := httptest.NewRequest(http.MethodGet, path, nil)
+	conditional.Header.Set("If-None-Match", get.Header().Get("ETag"))
+	notModified := httptest.NewRecorder()
+	server.Handler().ServeHTTP(notModified, conditional)
+	if notModified.Code != http.StatusNotModified {
+		t.Fatalf("If-None-Match status %d", notModified.Code)
+	}
+	head := httptest.NewRecorder()
+	server.Handler().ServeHTTP(head, httptest.NewRequest(http.MethodHead, path, nil))
+	if head.Code != 200 || head.Body.Len() != 0 {
+		t.Fatalf("HEAD response status=%d body=%q", head.Code, head.Body.String())
+	}
+	tree := httptest.NewRecorder()
+	server.Handler().ServeHTTP(tree, httptest.NewRequest(http.MethodGet, "/api/v1/courses/"+courseID+"/tree", nil))
+	if !strings.Contains(tree.Body.String(), "/api/v1/assets/"+image.ID+"/thumbnail") {
+		t.Fatalf("tree omitted available thumbnail URL: %s", tree.Body.String())
+	}
+	search := httptest.NewRecorder()
+	server.Handler().ServeHTTP(search, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=images&type=course", nil))
+	if !strings.Contains(search.Body.String(), "/api/v1/lessons/"+lesson.ID+"/thumbnail") {
+		t.Fatalf("course search result omitted its first lesson thumbnail: %s", search.Body.String())
+	}
+}
+
+func TestSearchCompletionAndRecentProgressFeatures(t *testing.T) {
+	root := t.TempDir()
+	course := filepath.Join(root, "Café Cloud")
+	if err := os.MkdirAll(course, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(course, "Kubernetes Basics.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "features.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	server, err := New(config.Config{BindAddress: "127.0.0.1:0", ContentRoot: root, LibraryName: "Test"}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Scan(context.Background(), "library_default", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Items(context.Background(), "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var courseID, lessonID string
+	for _, it := range items {
+		if it.Type == "course" {
+			courseID = it.ID
+		}
+		if it.Type == "lesson" {
+			lessonID = it.ID
+		}
+	}
+	if courseID == "" || lessonID == "" {
+		t.Fatalf("expected indexed course and lesson: %+v", items)
+	}
+
+	search := httptest.NewRecorder()
+	server.Handler().ServeHTTP(search, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=kube&type=lesson", nil))
+	if search.Code != http.StatusOK {
+		t.Fatalf("search status %d: %s", search.Code, search.Body.String())
+	}
+	var results struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(search.Body.Bytes(), &results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results.Items) != 1 || results.Items[0]["id"] != lessonID || results.Items[0]["coursePath"] != "Café Cloud" {
+		hits, hitErr := store.SearchEntries(context.Background(), "library_default", sqlite.PrefixQuery("kube"), "lesson", 20)
+		t.Fatalf("unexpected search result: %+v; hits=%+v err=%v expression=%q", results.Items, hits, hitErr, sqlite.PrefixQuery("kube"))
+	}
+	diacriticSearch := httptest.NewRecorder()
+	server.Handler().ServeHTTP(diacriticSearch, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=cafe&type=course", nil))
+	var diacriticResults struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(diacriticSearch.Body.Bytes(), &diacriticResults); err != nil {
+		t.Fatal(err)
+	}
+	if len(diacriticResults.Items) != 1 || diacriticResults.Items[0]["id"] != courseID {
+		t.Fatalf("diacritic-insensitive search failed: %s", diacriticSearch.Body.String())
+	}
+
+	putProgress := func(body string) int {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/lessons/"+lessonID+"/progress", strings.NewReader(body))
+		req.Header.Set("X-Medina-Profile", "client")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := putProgress(`{"positionSeconds":96,"durationSeconds":100}`); got != 200 {
+		t.Fatalf("auto-complete PUT status %d", got)
+	}
+	if got := putProgress(`{"positionSeconds":30,"durationSeconds":100}`); got != 200 {
+		t.Fatalf("sticky PUT status %d", got)
+	}
+	recent := func(query string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/progress/recent"+query, nil)
+		req.Header.Set("X-Medina-Profile", "client")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		var out map[string]any
+		if rec.Code != 200 {
+			t.Fatalf("recent status %d: %s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := len(recent("")["items"].([]any)); got != 0 {
+		t.Fatalf("completed lessons should be excluded, got %d", got)
+	}
+	if got := len(recent("?includeCompleted=true")["items"].([]any)); got != 1 {
+		t.Fatalf("expected included completed lesson, got %d", got)
+	}
+	if got := putProgress(`{"positionSeconds":30,"durationSeconds":100,"completed":false}`); got != 200 {
+		t.Fatalf("reopen PUT status %d", got)
+	}
+	if got := len(recent("")["items"].([]any)); got != 1 {
+		t.Fatalf("explicitly reopened lesson should be actionable, got %d", got)
+	}
+
+	courses := httptest.NewRequest(http.MethodGet, "/api/v1/courses/"+courseID, nil)
+	courses.Header.Set("X-Medina-Profile", "client")
+	courseRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(courseRec, courses)
+	var courseData map[string]any
+	if err := json.Unmarshal(courseRec.Body.Bytes(), &courseData); err != nil {
+		t.Fatal(err)
+	}
+	progress, ok := courseData["progress"].(map[string]any)
+	if !ok || progress["totalCount"] != float64(1) || progress["percent"] != float64(0) {
+		t.Fatalf("unexpected inline course progress: %+v", courseData)
+	}
+}
 
 func TestManualScanSubmissionDoesNotDependOnRequestContext(t *testing.T) {
 	root := t.TempDir()

@@ -16,6 +16,9 @@ services:
       SCAN_DEBOUNCE: ${SCAN_DEBOUNCE:-2s}
       SCAN_WORKERS: ${SCAN_WORKERS:-8}
       SCAN_DIRECTORY_WORKERS: ${SCAN_DIRECTORY_WORKERS:-4}
+      THUMBNAILS: ${THUMBNAILS:-true}
+      THUMBNAIL_MAX_DIM: ${THUMBNAIL_MAX_DIM:-320}
+      THUMBNAIL_CACHE_DIR: ${THUMBNAIL_CACHE_DIR:-}
       SCAN_WATCH: ${SCAN_WATCH:-true}
     volumes:
       # Set LIBRARY_MOUNT in .env to swap the read-only library folder.
