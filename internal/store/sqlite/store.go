@@ -436,6 +436,17 @@ func (s *Store) Items(ctx context.Context, libraryID string) ([]scanner.Item, er
 
 // CourseItems returns only the indexed course and its descendants using the
 // snapshot's parent index, avoiding a whole-library read for a course view.
+const courseItemsQuery = `WITH RECURSIVE course_items(item_id) AS (
+	SELECT item_id FROM entry_snapshots WHERE generation_id=? AND item_id=? AND entry_type='course'
+	UNION
+	-- CROSS JOIN preserves the parent-first loop order. Without it, SQLite may
+	-- scan every snapshot row for each parent rather than using entry_parent_idx.
+	SELECT child.item_id FROM course_items parent CROSS JOIN entry_snapshots child INDEXED BY entry_parent_idx
+	WHERE child.generation_id=? AND child.parent_item_id=parent.item_id
+)
+SELECT e.item_id,e.parent_item_id,e.entry_type,e.original_name,e.title,e.relative_path,e.sort_key,e.position,e.depth,e.size_bytes,e.modified_at,e.mime_type,e.extension,e.media_kind,e.lesson_id,e.subtitle_for,e.available,e.duration_seconds
+FROM entry_snapshots e JOIN course_items c ON c.item_id=e.item_id WHERE e.generation_id=?`
+
 func (s *Store) CourseItems(ctx context.Context, libraryID, courseID string) ([]scanner.Item, error) {
 	var gen sql.NullString
 	if err := s.DB.QueryRowContext(ctx, "SELECT active_generation_id FROM library_roots WHERE id=?", libraryID).Scan(&gen); err != nil {
@@ -444,14 +455,7 @@ func (s *Store) CourseItems(ctx context.Context, libraryID, courseID string) ([]
 	if !gen.Valid {
 		return []scanner.Item{}, nil
 	}
-	rows, err := s.DB.QueryContext(ctx, `WITH RECURSIVE course_items(item_id) AS (
-		SELECT item_id FROM entry_snapshots WHERE generation_id=? AND item_id=? AND entry_type='course'
-		UNION
-		SELECT child.item_id FROM entry_snapshots child JOIN course_items parent ON child.parent_item_id=parent.item_id
-		WHERE child.generation_id=?
-	)
-	SELECT e.item_id,e.parent_item_id,e.entry_type,e.original_name,e.title,e.relative_path,e.sort_key,e.position,e.depth,e.size_bytes,e.modified_at,e.mime_type,e.extension,e.media_kind,e.lesson_id,e.subtitle_for,e.available,e.duration_seconds
-	FROM entry_snapshots e JOIN course_items c ON c.item_id=e.item_id WHERE e.generation_id=?`, gen.String, courseID, gen.String, gen.String)
+	rows, err := s.DB.QueryContext(ctx, courseItemsQuery, gen.String, courseID, gen.String, gen.String)
 	if err != nil {
 		return nil, err
 	}

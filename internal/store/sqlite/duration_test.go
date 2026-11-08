@@ -70,6 +70,33 @@ func TestCourseItemsRestrictsReadToCourseSubtree(t *testing.T) {
 	if len(missing) != 0 {
 		t.Fatalf("unknown course returned %d entries", len(missing))
 	}
+
+	var generation string
+	if err := store.DB.QueryRowContext(ctx, `SELECT active_generation_id FROM library_roots WHERE id=?`, "library_default").Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.DB.QueryContext(ctx, "EXPLAIN QUERY PLAN "+courseItemsQuery, generation, courseA, generation, generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.Close()
+	usesParentIndex := false
+	for plan.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := plan.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, "USING INDEX entry_parent_idx") {
+			usesParentIndex = true
+		}
+	}
+	if err := plan.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !usesParentIndex {
+		t.Fatal("course item recursion did not use entry_parent_idx")
+	}
 }
 
 func TestParseMediaDuration(t *testing.T) {
