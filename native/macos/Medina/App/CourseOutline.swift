@@ -16,6 +16,13 @@ private func lessonDuration(_ lesson: TreeNode, model: LibraryModel) -> Double? 
     return nil
 }
 
+private struct PreparedCourseOutline: Sendable {
+    let treeID: String
+    let revision: Int
+    let groups: [SectionGroup]
+    let courseResources: [TreeNode]
+}
+
 /// The course sidebar: a Continue card before playback, then styled collapsible
 /// sections and a single course-progress footer. Lessons are the primary rows;
 /// supporting files live in a collapsible "Resources" folder tree per section
@@ -35,9 +42,14 @@ struct CourseOutline: View {
     @State private var expandedSections: Set<String> = []
     @State private var expandedResources: Set<String> = []
     @State private var seededForCourse: String?
+    @State private var preparedOutline: PreparedCourseOutline?
 
-    private var groups: [SectionGroup] { CourseTree.sectionGroups(of: tree, progress: model.courseProgress) }
-    private var courseResources: [TreeNode] { CourseTree.courseResources(of: tree) }
+    private var preparedForTree: PreparedCourseOutline? {
+        guard preparedOutline?.treeID == tree.id else { return nil }
+        return preparedOutline
+    }
+    private var groups: [SectionGroup] { preparedForTree?.groups ?? [] }
+    private var courseResources: [TreeNode] { preparedForTree?.courseResources ?? [] }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,31 +58,36 @@ struct CourseOutline: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
-                                SectionBlock(
-                                    group: group,
-                                    depth: 0,
-                                    number: groups.prefix(index).filter { !$0.isSynthetic }.count + 1,
+                        if let prepared = preparedForTree {
+                            if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                ForEach(Array(prepared.groups.enumerated()), id: \.element.id) { index, group in
+                                    SectionBlock(
+                                        group: group,
+                                        depth: 0,
+                                        number: prepared.groups.prefix(index).filter { !$0.isSynthetic }.count + 1,
+                                        model: model,
+                                        expandedSections: $expandedSections,
+                                        expandedResources: $expandedResources
+                                    )
+                                }
+                            } else {
+                                searchResults
+                            }
+                            if search.isEmpty && !prepared.courseResources.isEmpty {
+                                ResourceDisclosure(
+                                    id: "\(tree.id)#course-resources",
+                                    title: "Course resources",
+                                    resources: prepared.courseResources,
                                     model: model,
-                                    expandedSections: $expandedSections,
+                                    isExpanded: expandedResources.contains("\(tree.id)#course-resources"),
+                                    onToggle: { toggle(&expandedResources, "\(tree.id)#course-resources") },
                                     expandedResources: $expandedResources
                                 )
+                                .padding(.top, 4)
                             }
                         } else {
-                            searchResults
-                        }
-                        if search.isEmpty && !courseResources.isEmpty {
-                            ResourceDisclosure(
-                                id: "\(tree.id)#course-resources",
-                                title: "Course resources",
-                                resources: courseResources,
-                                model: model,
-                                isExpanded: expandedResources.contains("\(tree.id)#course-resources"),
-                                onToggle: { toggle(&expandedResources, "\(tree.id)#course-resources") },
-                                expandedResources: $expandedResources
-                            )
-                            .padding(.top, 4)
+                            ProgressView("Preparing course outline…")
+                                .frame(maxWidth: .infinity).padding(.vertical, 24)
                         }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 8)
@@ -95,6 +112,25 @@ struct CourseOutline: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.canvas(scheme))
         .onAppear { seedExpansionIfNeeded() }
+        .task(id: "\(tree.id):\(model.outlineRevision)") {
+            let root = tree
+            let progress = model.courseProgress
+            let revision = model.outlineRevision
+            let started = ProcessInfo.processInfo.systemUptime
+            let prepared = await Task.detached(priority: .userInitiated) {
+                PreparedCourseOutline(
+                    treeID: root.id,
+                    revision: revision,
+                    groups: CourseTree.sectionGroups(of: root, progress: progress),
+                    courseResources: CourseTree.courseResources(of: root)
+                )
+            }.value
+            guard !Task.isCancelled, model.outlineRevision == revision else { return }
+            preparedOutline = prepared
+            let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - started) * 1_000)
+            AppSettings.shared.logDebug("Prepared sidebar outline for '\(root.title)' in \(elapsedMS) ms", category: "outline-timing")
+            seedExpansionIfNeeded()
+        }
         .onChange(of: tree.id) { _, _ in seededForCourse = nil; search = ""; seedExpansionIfNeeded() }
         .onChange(of: focusSearchRequest) { _, _ in searchFocused = true }
     }
@@ -204,7 +240,7 @@ struct CourseOutline: View {
     /// On first display of a course, open the ancestor chain down to where the
     /// learner should continue (the resume target), so they land on it directly.
     private func seedExpansionIfNeeded() {
-        guard seededForCourse != tree.id else { return }
+        guard preparedForTree != nil, seededForCourse != tree.id else { return }
         seededForCourse = tree.id
         if let target = model.resumeTarget {
             expandSectionContaining(lessonID: target.id)
@@ -214,6 +250,7 @@ struct CourseOutline: View {
     }
 
     private func expandSectionContaining(lessonID: String) {
+        guard preparedForTree != nil else { return }
         // Expand every ancestor section of the playing lesson so it's visible.
         var toOpen: [String] = []
         func search(_ group: SectionGroup) -> Bool {

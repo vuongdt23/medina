@@ -26,11 +26,22 @@ struct CourseFocus: View {
             VStack(spacing: 0) {
                 topBar
                 Divider()
-                if let tree = model.tree {
+                if let tree = model.tree, tree.id == model.selectedCourseID {
                     workspace(tree: tree, size: geometry.size)
+                } else if let loadingID = model.treeLoadingCourseID,
+                          loadingID == model.selectedCourseID {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Loading \(model.courses.first(where: { $0.id == loadingID }).map { CourseName.clean($0.title) } ?? "course")…")
+                            .font(.system(size: 14, weight: .medium))
+                        Text("Preparing the course outline")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityElement(children: .combine)
                 } else {
-                    ContentUnavailableView("Preparing course…", systemImage: "books.vertical",
-                                           description: Text("Course content will appear here when available."))
+                    ContentUnavailableView("Course unavailable", systemImage: "books.vertical",
+                                           description: Text("The course outline could not be loaded."))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

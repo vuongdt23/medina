@@ -38,7 +38,9 @@ final class LibraryModel {
     var libraries: [Library] = []
     var courses: [Course] = []
     var selectedCourseID: String? = UserDefaults.standard.string(forKey: "selectedCourseID")
-    var tree: TreeNode?
+    var tree: TreeNode? { didSet { outlineRevision &+= 1 } }
+    var outlineRevision = 0
+    var treeLoadingCourseID: String?
     var selectedItemID: String?
     var selectedAsset: TreeNode?
     var itemSelectionRevision = 0
@@ -270,6 +272,7 @@ final class LibraryModel {
         if record.isEffectivelyComplete && !wasComplete {
             next.completedCount = min(next.totalCount == 0 ? next.completedCount + 1 : next.totalCount,
                                       next.completedCount + 1)
+            outlineRevision &+= 1
         }
         courseProgress = next
     }
@@ -308,10 +311,14 @@ final class LibraryModel {
         selectedItemID = nil
         selectedAsset = nil
         courseProgress = .empty
+        outlineRevision &+= 1
+        if tree?.id != course.id { tree = nil }
         guard client != nil else {
             if let cached = cache?.load() { tree = cached.trees[course.id] }
+            treeLoadingCourseID = nil
             return
         }
+        treeLoadingCourseID = tree?.id == course.id ? nil : course.id
         await loadTree(courseID: course.id, token: token)
         await loadProgress(courseID: course.id)
     }
@@ -339,6 +346,7 @@ final class LibraryModel {
             let incoming = try await client.courseProgress(courseID: courseID, profileID: profileIdentifier)
             guard selectedCourseID == courseID else { return }
             courseProgress = incoming
+            outlineRevision &+= 1
         } catch {
             // Keep whatever we had; progress is non-essential.
         }
@@ -346,6 +354,12 @@ final class LibraryModel {
 
     private func loadTree(courseID: String, token: UUID) async {
         guard let client else { return }
+        if tree?.id != courseID { treeLoadingCourseID = courseID }
+        defer {
+            if treeRequestToken == token, treeLoadingCourseID == courseID {
+                treeLoadingCourseID = nil
+            }
+        }
         do {
             let incoming = try await client.tree(courseID: courseID)
             guard treeRequestToken == token, selectedCourseID == courseID else { return }
