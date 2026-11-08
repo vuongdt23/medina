@@ -4,7 +4,7 @@ import MedinaCore
 import MedinaPlayback
 
 /// Adaptive shell: the inspector and outline keep their identity through live
-/// resizing. Only their geometry changes; the VLC player remains model-owned.
+/// resizing. The libmpv player remains model-owned.
 struct CourseFocus: View {
     @Bindable var model: LibraryModel
     @Environment(\.colorScheme) private var scheme
@@ -112,7 +112,7 @@ struct CourseFocus: View {
         let width = layout.sidebarWidth(preferred: preferredSidebarWidth, available: size.width)
         let inline = sidebarVisible && layout != .compact
         return ZStack(alignment: .leading) {
-            inspector(tree: tree, short: size.height < 540)
+            inspector(short: size.height < 540)
                 .padding(.leading, inline ? width + 6 : 0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(!(layout == .compact && sidebarVisible))
@@ -171,8 +171,8 @@ struct CourseFocus: View {
             .help("Drag to resize course content")
     }
 
-    @ViewBuilder private func inspector(tree: TreeNode, short: Bool) -> some View {
-        let selected = CourseTree.outline(of: tree).first(where: { $0.id == model.selectedItemID })?.item
+    @ViewBuilder private func inspector(short: Bool) -> some View {
+        let selected = model.selectedAsset?.id == model.selectedItemID ? model.selectedAsset : nil
         if let selected, selected.type == "asset" {
             ItemDetail(item: selected, client: model.currentClient,
                        progress: model.courseProgress.progress(for: selected.id),
@@ -183,7 +183,7 @@ struct CourseFocus: View {
             PlaybackPanel(
                 engine: engine,
                 lessonTitle: model.lessonQueue?.current?.title ?? engine.title,
-                lessonContext: lessonContext(tree: tree),
+                lessonContext: lessonContext(),
                 upNextTitle: model.lessonQueue?.next?.title,
                 hasPrevious: model.lessonQueue?.previous != nil,
                 hasNext: model.lessonQueue?.next != nil,
@@ -199,10 +199,8 @@ struct CourseFocus: View {
         }
     }
 
-    private func lessonContext(tree: TreeNode) -> String {
-        let lessons = CourseTree.lessons(in: tree)
-        guard let id = model.lessonQueue?.current?.id,
-              let index = lessons.firstIndex(where: { $0.id == id }) else { return "" }
-        return "Lesson \(index + 1) of \(lessons.count)"
+    private func lessonContext() -> String {
+        guard let queue = model.lessonQueue, !queue.lessons.isEmpty else { return "" }
+        return "Lesson \(queue.currentIndex + 1) of \(queue.lessons.count)"
     }
 }

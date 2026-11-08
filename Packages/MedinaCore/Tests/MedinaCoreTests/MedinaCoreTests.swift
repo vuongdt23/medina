@@ -14,6 +14,14 @@ final class MedinaCoreTests: XCTestCase {
         XCTAssertNil(missing.children)
     }
 
+    func testTreeNodeDecodesOptionalBackendDuration() throws {
+        let json = #"{"id":"lesson","type":"lesson","title":"Lesson","durationSeconds":1179.5}"#.data(using: .utf8)!
+        let lesson = try JSONDecoder().decode(TreeNode.self, from: json)
+        XCTAssertEqual(lesson.durationSeconds, 1179.5)
+        let olderServerJSON = #"{"id":"legacy","type":"lesson","title":"Legacy"}"#.data(using: .utf8)!
+        XCTAssertNil(try JSONDecoder().decode(TreeNode.self, from: olderServerJSON).durationSeconds)
+    }
+
     func testLessonTraversalUsesSharedSiblingPositionsDepthFirst() {
         let lessonA = TreeNode(id: "a", type: "lesson", title: "A", position: 0,
                                assets: [TreeNode(id: "attachment", type: "asset", title: "Notes", position: 0)])
@@ -174,6 +182,9 @@ final class MedinaCoreTests: XCTestCase {
         XCTAssertEqual(g.directLessons.map(\.id), ["direct"])
         guard case .subsection(let gB) = g.children[2] else { return XCTFail("expected subsection") }
         XCTAssertEqual(gB.directLessons.map(\.id), ["deep"])
+        XCTAssertTrue(g.containsLesson(id: "deep"))
+        XCTAssertTrue(g.containsLesson(id: "direct"))
+        XCTAssertFalse(g.containsLesson(id: "missing"))
         // Parent resources: its own file + its direct lesson's; subsection files
         // belong to the subsection, not duplicated into the parent.
         XCTAssertEqual(Set(g.resources.map(\.id)), ["topfile"])

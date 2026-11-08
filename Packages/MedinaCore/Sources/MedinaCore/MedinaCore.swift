@@ -114,6 +114,7 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
     public var mimeType: String?
     public var fileExtension: String?
     public var sizeBytes: Int64?
+    public var durationSeconds: Double?
     public var streamUrl: String?
     public var contentUrl: String?
     public var children: [TreeNode]?
@@ -124,13 +125,15 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
 
     public init(id: String, type: String, title: String, originalName: String? = nil,
                 position: Int? = nil, mediaKind: String? = nil, mimeType: String? = nil,
-                extension fileExtension: String? = nil, sizeBytes: Int64? = nil, streamUrl: String? = nil,
+                extension fileExtension: String? = nil, sizeBytes: Int64? = nil,
+                durationSeconds: Double? = nil, streamUrl: String? = nil,
                 contentUrl: String? = nil, children: [TreeNode]? = nil,
                 sections: [TreeNode]? = nil, lessons: [TreeNode]? = nil,
                 assets: [TreeNode]? = nil, subtitles: [TreeNode]? = nil) {
         self.id = id; self.type = type; self.title = title; self.originalName = originalName
         self.position = position; self.mediaKind = mediaKind; self.mimeType = mimeType
-        self.fileExtension = fileExtension; self.sizeBytes = sizeBytes; self.streamUrl = streamUrl
+        self.fileExtension = fileExtension; self.sizeBytes = sizeBytes; self.durationSeconds = durationSeconds
+        self.streamUrl = streamUrl
         self.contentUrl = contentUrl; self.children = children; self.sections = sections
         self.lessons = lessons; self.assets = assets; self.subtitles = subtitles
     }
@@ -154,7 +157,7 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, type, title, originalName, position, mediaKind, mimeType, sizeBytes
+        case id, type, title, originalName, position, mediaKind, mimeType, sizeBytes, durationSeconds
         case streamUrl, contentUrl, children, sections, lessons, assets, subtitles
         case fileExtension = "extension"
     }
@@ -314,6 +317,16 @@ public struct SectionGroup: Identifiable, Sendable {
         self.total = total
         self.isSynthetic = isSynthetic
     }
+
+    /// Checks current-lesson containment without flattening or sorting the tree.
+    public func containsLesson(id: String) -> Bool {
+        children.contains { child in
+            switch child {
+            case .lesson(let lesson): return lesson.id == id
+            case .subsection(let group): return group.containsLesson(id: id)
+            }
+        }
+    }
 }
 
 public enum CourseTree {
@@ -469,23 +482,26 @@ public enum CourseTree {
     private static func makeSectionGroup(_ section: TreeNode, progress: CourseProgress) -> SectionGroup {
         var children: [SectionGroup.Child] = []
         var resources = section.resourceAssets
+        var completed = 0
+        var total = 0
         for child in section.orderedNavigableChildren {
             switch child.type {
             case "lesson":
                 children.append(.lesson(child))
                 resources.append(contentsOf: child.resourceAssets)
+                total += 1
+                if progress.progress(for: child.id)?.isEffectivelyComplete == true { completed += 1 }
             case "section":
-                children.append(.subsection(makeSectionGroup(child, progress: progress)))
+                let subsection = makeSectionGroup(child, progress: progress)
+                completed += subsection.completed
+                total += subsection.total
+                children.append(.subsection(subsection))
             default:
                 break
             }
         }
-        let allLessons = lessons(in: section)
-        let completed = allLessons.filter {
-            progress.progress(for: $0.id)?.isEffectivelyComplete ?? false
-        }.count
         return SectionGroup(section: section, children: children, resources: resources,
-                            completed: completed, total: allLessons.count)
+                            completed: completed, total: total)
     }
 
     /// Course-level resource files/folders attached directly to the root.

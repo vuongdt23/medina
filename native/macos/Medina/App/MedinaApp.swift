@@ -7,9 +7,10 @@ struct MedinaApp: App {
     @State private var settings = AppSettings.shared
 
     init() {
-        // Keep the first VLC lesson from paying libVLC's decoder/plugin startup
-        // cost on the main interaction path.
-        PlaybackSession.prewarmVLC()
+        // Warm the real player client off the first lesson interaction and hand
+        // the prepared handle to playback when its cache setting matches.
+        let bufferMB = min(1024, max(16, UserDefaults.standard.object(forKey: "prefetchBufferMB") as? Int ?? 1024))
+        PlaybackSession.prewarmMpv(prefetchBufferBytes: bufferMB * (1 << 20))
     }
 
     var body: some Scene {
@@ -39,10 +40,18 @@ final class LibraryModel {
     var selectedCourseID: String? = UserDefaults.standard.string(forKey: "selectedCourseID")
     var tree: TreeNode?
     var selectedItemID: String?
+    var selectedAsset: TreeNode?
     var itemSelectionRevision = 0
 
     func selectItem(id: String) {
+        selectedAsset = nil
         selectedItemID = id
+        itemSelectionRevision += 1
+    }
+
+    func selectAsset(_ asset: TreeNode) {
+        selectedAsset = asset
+        selectedItemID = asset.id
         itemSelectionRevision += 1
     }
     var status: IndexStatus?
@@ -138,15 +147,18 @@ final class LibraryModel {
     func playLesson(_ lesson: TreeNode) {
         guard lesson.type == "lesson", let client, let stream = lesson.streamUrl else { return }
         if playbackEngine != nil { reportPlaybackProgress(force: true) }
-        AppSettings.shared.logInfo("Starting lesson '\(lesson.title)' with VLC", category: "playback")
-        let lessons = tree.map { CourseTree.lessons(in: $0) } ?? [lesson]
+        AppSettings.shared.logInfo("Starting lesson '\(lesson.title)' with libmpv", category: "playback")
+        let queueStartedAt = ProcessInfo.processInfo.systemUptime
+        let lessons = lessonQueue?.lessons ?? tree.map { CourseTree.lessons(in: $0) } ?? [lesson]
+        let queueMilliseconds = Int((ProcessInfo.processInfo.systemUptime - queueStartedAt) * 1_000)
+        AppSettings.shared.logInfo("Prepared playback queue: \(lessons.count) lessons in \(queueMilliseconds) ms", category: "playback-timing")
         lessonQueue = LessonQueue(lessons: lessons, startingAt: lesson.id)
         if playbackEngine == nil {
             let engine = PlaybackSession()
             engine.onNaturalEnd = { [weak self] in self?.advanceAfterNaturalEnd() }
             engine.onDiagnostic = { isDebug, message in
-                if isDebug { AppSettings.shared.logDebug(message, category: "vlc") }
-                else { AppSettings.shared.logInfo(message, category: "vlc") }
+                if isDebug { AppSettings.shared.logDebug(message, category: "mpv") }
+                else { AppSettings.shared.logInfo(message, category: "mpv") }
             }
             playbackEngine = engine
         }
@@ -279,7 +291,10 @@ final class LibraryModel {
             let selected = tree.flatMap { tree in
                 CourseTree.outline(of: tree).first(where: { $0.id == selectedItemID })?.item
             }
-            if selected?.type != "asset" { selectedItemID = lesson.id }
+            if selected?.type != "asset" {
+                selectedAsset = nil
+                selectedItemID = lesson.id
+            }
         }
         lastReportedLessonID = nil
         lastReportedAt = .distantPast
@@ -291,6 +306,7 @@ final class LibraryModel {
         selectedCourseID = course.id
         UserDefaults.standard.set(course.id, forKey: "selectedCourseID")
         selectedItemID = nil
+        selectedAsset = nil
         courseProgress = .empty
         guard client != nil else {
             if let cached = cache?.load() { tree = cached.trees[course.id] }

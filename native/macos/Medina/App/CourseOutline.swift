@@ -2,6 +2,20 @@ import SwiftUI
 import AppKit
 import MedinaCore
 
+@MainActor
+private func lessonDuration(_ lesson: TreeNode, model: LibraryModel) -> Double? {
+    if model.lessonQueue?.current?.id == lesson.id,
+       let duration = model.playbackEngine?.duration, duration.isFinite, duration > 0 {
+        return duration
+    }
+    if let duration = lesson.durationSeconds, duration.isFinite, duration > 0 { return duration }
+    if let duration = model.courseProgress.progress(for: lesson.id)?.durationSeconds,
+       duration.isFinite, duration > 0 {
+        return duration
+    }
+    return nil
+}
+
 /// The course sidebar: a Continue card before playback, then styled collapsible
 /// sections and a single course-progress footer. Lessons are the primary rows;
 /// supporting files live in a collapsible "Resources" folder tree per section
@@ -156,7 +170,7 @@ struct CourseOutline: View {
                               isSelected: result.id == model.selectedItemID,
                               isPlaying: result.id == model.lessonQueue?.current?.id,
                               progress: model.courseProgress.progress(for: result.id),
-                              durationSeconds: model.courseProgress.progress(for: result.id)?.durationSeconds)
+                              durationSeconds: lessonDuration(result.lesson, model: model))
                 }
             }
             .buttonStyle(.plain)
@@ -261,7 +275,7 @@ struct SectionBlock: View {
     @State private var isHovering = false
     private var containsCurrentLesson: Bool {
         guard let id = model.lessonQueue?.current?.id else { return false }
-        return CourseTree.lessons(in: group.section).contains { $0.id == id }
+        return group.containsLesson(id: id)
     }
     private var sectionLabel: String {
         if depth > 0 { return "SUBSECTION" }
@@ -337,7 +351,7 @@ struct SectionBlock: View {
                 isSelected: lesson.id == model.selectedItemID,
                 isPlaying: lesson.id == model.lessonQueue?.current?.id,
                 progress: model.courseProgress.progress(for: lesson.id),
-                durationSeconds: lessonDuration(lesson.id)
+                durationSeconds: lessonDuration(lesson, model: model)
             )
         }
         .buttonStyle(.plain)
@@ -388,11 +402,6 @@ struct SectionBlock: View {
         }
     }
 
-    private func lessonDuration(_ id: String) -> Double? {
-        if model.lessonQueue?.current?.id == id, let d = model.playbackEngine?.duration, d > 0 { return d }
-        if let d = model.courseProgress.progress(for: id)?.durationSeconds, d > 0 { return d }
-        return nil
-    }
 }
 
 // MARK: - Lesson row
@@ -598,7 +607,7 @@ struct ResourceFileRow: View {
         .background(isSelected ? Theme.accent.opacity(scheme == .dark ? 0.2 : 0.12) : .clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
-        .onTapGesture { model.selectItem(id: node.id) }
+        .onTapGesture { model.selectAsset(node) }
         .onHover { isHovering = $0 }
         .help(node.originalName ?? node.title)
     }

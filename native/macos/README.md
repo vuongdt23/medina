@@ -2,15 +2,15 @@
 
 ## Engine rollout
 
-The native macOS app and `MedinaPlayback` target require macOS 15 because they
-use SwiftVLC, pinned exactly to `1.1.0-beta.14`. VLC is Medina's only playback
-engine: it owns one package-managed rendering surface and Medina-owned controls
-(play/pause, seeking, volume, speed, audio/subtitle tracks, and AppKit
-fullscreen). External subtitle sidecars are supplied before playback. System
-PiP is not enabled.
+The native macOS app and `MedinaPlayback` target require macOS 15 and use
+libmpv through a small C interoperability target. Install the Homebrew `mpv`
+formula (which provides `libmpv` and its dependencies) before building. The
+player owns one libmpv client/render context and Medina-owned controls. External
+subtitle sidecars are attached as libmpv subtitle tracks. System PiP is not
+enabled.
 
-The native app requires Xcode 26.4 / Swift 6.3 or newer to resolve the pinned
-SwiftVLC prerelease. Swift language mode remains Swift 6.
+The native app requires Xcode 26.4 / Swift 6.3 or newer. `pkg-config mpv` must
+resolve in the build environment. Swift language mode remains Swift 6.
 
 The native macOS course workspace adapts to **window space in logical points**,
 not display resolution. The app supports windows down to 480 × 360 pt.
@@ -32,10 +32,11 @@ open or clear them.
 - Threshold hysteresis prevents repeated transitions during live resizing.
 - Short windows (under 540 pt tall) omit the resume card and secondary player
   metadata; typography stays readable and primary controls remain available.
-- VLC aspect-fit rendering preserves the video, including instructional text.
+- libmpv's embedded OpenGL surface uses aspect-fit rendering and preserves
+  video content, including instructional text.
 
 The outline and playback inspector retain their SwiftUI identity across layout
-changes. `LibraryModel` continues to own the VLC playback session. Progress reporting belongs
+changes. `LibraryModel` continues to own the libmpv playback session. Progress reporting belongs
 to the course workspace, so it continues while a supporting file is open.
 
 Sidebar width, Focus mode, outline density, and auto-play preference are saved
@@ -58,11 +59,40 @@ Focus mode hides navigation and uses dark appearance in non-compact windows.
 - Section cards use numbered headers, restrained borders, and a warm highlight
   for the current section. Nested sections avoid stacked card backgrounds. A
   header has just one action: expand/collapse; selecting a lesson starts playback.
-- VLC supplies play/pause, seeking, volume, speed, audio/subtitle menus, and
-  public AppKit fullscreen. The footer adds only previous/next **lesson**
-  navigation and an auto-next switch; it is not a duplicate transport bar.
+- Medina supplies play/pause, seeking, volume, speed, audio/subtitle menus, and
+  embedded libmpv rendering. Its edge-to-edge OSC uses a video scrim, lesson
+  context, a full-width timeline, warm-accent transport controls, and transient
+  feedback; playback options move into an adaptive popover on compact windows.
+  The footer adds only previous/next **lesson** navigation and an auto-next
+  switch; it is not a duplicate transport bar.
 - The Continue/Resume card appears only before a playback session is active.
 - With auto-play disabled, natural EOF shows completion; use the play button to replay.
+
+## Seek previews
+
+Hover or drag the playback timeline to see a timestamp and an on-demand frame.
+The native client uses a separate AVFoundation image generator, never seeking or
+snapshotting the active libmpv player. No server thumbnail endpoint, external
+ffmpeg tool, or pre-generated storyboard is required.
+
+Requests are quantized to one-second buckets, with one decode in flight and only
+the newest pending target retained. A per-lesson, 60-image LRU cache avoids repeat
+work. Old results cannot replace the currently requested frame, and lesson
+changes invalidate the cache. While a frame is decoding the preview card shows
+“Loading preview…”; failures show “Preview unavailable” plus the timestamp and
+are reported through playback diagnostics. Leaving the timeline cancels work
+cooperatively; any active AVFoundation decode drains before another request can
+start.
+
+Controls remain visible while hovering or scrubbing. The seek bar overlays libmpv's
+cached, seekable time ranges ahead of the playhead; only ranges reported as
+actually seekable by the demuxer are shown. Dragging changes the local thumb and
+preview only; releasing commits a single playback seek. Native slider keyboard
+and accessibility adjustments still seek immediately.
+
+This borrows thumbfast's on-demand scheduling model, not its persistent mpv
+helper. Thumbnail extraction is handled separately from libmpv playback;
+latency and extra HTTP-range traffic depend on the media and network.
 
 ## App icon
 
@@ -87,8 +117,21 @@ Relaunch the application after rebuilding to refresh its Dock icon.
 ## Verification
 
 Automated: `make macos-test` covers layout thresholds/hysteresis, sidebar clamping,
-lesson search ancestry/order, and playback speed bounds/persistence. Build the
-native application with `make macos-build`.
+lesson search ancestry/order, playback speed bounds/persistence, and thumbnail
+scheduling/cancellation/cache isolation (including a real AVFoundation frame extraction).
+Build the native application with `make macos-build`.
+
+To check the actual decoder against a remote lesson without starting playback:
+
+```sh
+cd Packages/MedinaPlayback
+MEDINA_PREVIEW_TEST_URL='http://server:17843/api/v1/lessons/ITEM_ID/content' \
+MEDINA_PREVIEW_TEST_TIME=41 \
+swift test --filter testRealThumbnailLeavesPlaybackSessionIdle
+```
+
+Without these environment variables, that test uses the repository's local MP4
+fixture. This HTTP check complements, rather than replaces, the live UI checks.
 
 Manual acceptance checklist (requires the app and playable course media):
 
@@ -105,12 +148,28 @@ Manual acceptance checklist (requires the app and playable course media):
 7. Scroll elsewhere while playing. Confirm auto-advance doesn't force scrolling;
    use the scope button to return to the active lesson.
 8. Open a resource while playing; return using the player button in the header.
-9. Select a VLC playback speed, pause/resume, and advance. Confirm the selection
-   persists and the footer has no duplicate transport controls.
-10. Disable auto-next, finish a lesson, replay with the VLC controls, and manually advance.
-    Confirm completion is recorded and the last lesson has a disabled Next button.
-11. Check light/dark appearance, keyboard navigation, and VoiceOver. Hidden
+9. Check the redesigned OSC in wide and compact layouts: title/up-next header,
+   edge-to-edge timeline, amber play control, playback-options popover, and
+   transient seek/pause/speed feedback. Verify settings stay usable while the
+   controls are visible and fade only after playback resumes.
+10. Select a playback speed, pause/resume, and advance. Confirm the selection
+    persists and the footer has no duplicate transport controls.
+11. Disable auto-next, finish a lesson, replay with the playback controls, and
+    manually advance. Confirm completion is recorded and the last lesson has a
+    disabled Next button.
+12. Check light/dark appearance, keyboard navigation, and VoiceOver. Hidden
     course navigation must not retain interactive controls in the tab order.
 
-Physical display transitions and live VLC rendering require manual validation;
+13. Hover across the timeline, then drag rapidly forwards/backwards. Previews
+    must follow the target without moving the playback clock until release.
+    Keep the pointer still over the slider for more than three seconds: controls
+    and preview must remain visible. Verify endpoint alignment and a bubble that
+    stays within the controls at compact and wide widths.
+14. Leave the timeline or switch lessons while a preview is loading. No old
+    thumbnail may appear in the new lesson. Revisit a cached position, test a
+    remote HTTP lesson, and check the loading/error states for unsupported media.
+15. Tab to the seek slider and use arrow keys or VoiceOver adjustments; playback
+    must seek immediately without requiring a mouse release.
+
+Physical display transitions and live libmpv rendering require manual validation;
 unit tests do not substitute for those checks.

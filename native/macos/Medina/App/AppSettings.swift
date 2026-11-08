@@ -22,10 +22,10 @@ final class AppSettings {
     var persistentLoggingEnabled: Bool {
         didSet { defaults.set(persistentLoggingEnabled, forKey: "persistentLoggingEnabled") }
     }
-    /// libVLC prefetch read-ahead buffer, in megabytes, applied on the next
-    /// lesson load. A larger buffer lets VLC pull far ahead of playback over a
-    /// laggy link, at the cost of RAM. The Settings slider constrains input to
-    /// 16...1024 MB; `prefetchBufferBytes` is the value handed to libVLC.
+    /// libmpv's demuxer read-ahead limit, in megabytes, applied when a new
+    /// playback session starts. A larger buffer can reduce stalls on high-latency
+    /// links but uses more memory. The Settings slider constrains input to
+    /// 16...1024 MB; `prefetchBufferBytes` is the value handed to libmpv.
     ///
     /// The didSet only persists — it must not reassign the property. Under
     /// @Observable this is a synthesized computed property, so a self-write
@@ -138,7 +138,7 @@ struct AppSettingsView: View {
                 } maximumValueLabel: {
                     Text("1 GB").font(.caption2).foregroundStyle(.secondary)
                 }
-                Text("How much libVLC reads ahead of playback into memory. A larger buffer pulls further ahead on slow or high-latency links so playback is less likely to stall, at the cost of RAM. Applies to the next lesson you open. Default 1 GB.")
+                Text("How much libmpv reads ahead of playback into memory. A larger buffer may reduce stalls on slow or high-latency links, at the cost of RAM. Applies when the next playback session starts. Default 1 GB.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Logging") {
