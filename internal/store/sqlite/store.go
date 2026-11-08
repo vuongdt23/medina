@@ -434,6 +434,31 @@ func (s *Store) Items(ctx context.Context, libraryID string) ([]scanner.Item, er
 	return s.itemsWhere(ctx, libraryID, "", nil)
 }
 
+// CourseItems returns only the indexed course and its descendants using the
+// snapshot's parent index, avoiding a whole-library read for a course view.
+func (s *Store) CourseItems(ctx context.Context, libraryID, courseID string) ([]scanner.Item, error) {
+	var gen sql.NullString
+	if err := s.DB.QueryRowContext(ctx, "SELECT active_generation_id FROM library_roots WHERE id=?", libraryID).Scan(&gen); err != nil {
+		return nil, err
+	}
+	if !gen.Valid {
+		return []scanner.Item{}, nil
+	}
+	rows, err := s.DB.QueryContext(ctx, `WITH RECURSIVE course_items(item_id) AS (
+		SELECT item_id FROM entry_snapshots WHERE generation_id=? AND item_id=? AND entry_type='course'
+		UNION
+		SELECT child.item_id FROM entry_snapshots child JOIN course_items parent ON child.parent_item_id=parent.item_id
+		WHERE child.generation_id=?
+	)
+	SELECT e.item_id,e.parent_item_id,e.entry_type,e.original_name,e.title,e.relative_path,e.sort_key,e.position,e.depth,e.size_bytes,e.modified_at,e.mime_type,e.extension,e.media_kind,e.lesson_id,e.subtitle_for,e.available,e.duration_seconds
+	FROM entry_snapshots e JOIN course_items c ON c.item_id=e.item_id WHERE e.generation_id=?`, gen.String, courseID, gen.String, gen.String)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanItems(rows)
+}
+
 // Courses avoids loading the entire library for the frequently polled sidebar.
 func (s *Store) Courses(ctx context.Context, libraryID string) ([]scanner.Item, error) {
 	return s.itemsWhere(ctx, libraryID, " AND entry_type=? ORDER BY position,item_id", []any{"course"})
@@ -453,6 +478,10 @@ func (s *Store) itemsWhere(ctx context.Context, libraryID, filter string, args [
 		return nil, err
 	}
 	defer rows.Close()
+	return scanItems(rows)
+}
+
+func scanItems(rows *sql.Rows) ([]scanner.Item, error) {
 	var out []scanner.Item
 	for rows.Next() {
 		var it scanner.Item
@@ -460,7 +489,7 @@ func (s *Store) itemsWhere(ctx context.Context, libraryID, filter string, args [
 		var size int64
 		var duration float64
 		var available int
-		err = rows.Scan(&it.ID, &parent, &it.Type, &it.OriginalName, &it.Title, &it.RelativePath, &it.SortKey, &it.Position, &it.Depth, &size, &modified, &mimeType, &ext, &kind, &lesson, &subtitle, &available, &duration)
+		err := rows.Scan(&it.ID, &parent, &it.Type, &it.OriginalName, &it.Title, &it.RelativePath, &it.SortKey, &it.Position, &it.Depth, &size, &modified, &mimeType, &ext, &kind, &lesson, &subtitle, &available, &duration)
 		if err != nil {
 			return nil, err
 		}

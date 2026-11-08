@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -148,6 +149,47 @@ func TestAssetTreeSerializesEachItemOnce(t *testing.T) {
 	}
 	if rec.Body.Len() > 16000 {
 		t.Fatalf("unexpectedly large tree: %d bytes", rec.Body.Len())
+	}
+}
+
+func TestCourseTreeGzipCompressionNegotiation(t *testing.T) {
+	server, store, _ := regressionServer(t, map[string]string{"Course/lesson.mp4": "not real media"})
+	items, err := store.Items(context.Background(), "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var courseID string
+	for _, item := range items {
+		if item.Type == "course" {
+			courseID = item.ID
+		}
+	}
+	if courseID == "" {
+		t.Fatal("course was not indexed")
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/courses/"+courseID+"/tree", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("unexpected compressed response: status=%d headers=%v", recorder.Code, recorder.Header())
+	}
+	reader, err := gzip.NewReader(recorder.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(decoded) || !strings.Contains(string(decoded), `"type":"lesson"`) {
+		t.Fatalf("decompressed body is not valid course JSON: %s", decoded)
+	}
+	if !strings.Contains(strings.ToLower(recorder.Header().Get("Vary")), "accept-encoding") {
+		t.Fatalf("missing Vary: Accept-Encoding header: %v", recorder.Header())
 	}
 }
 

@@ -53,7 +53,7 @@ func (s *Server) SetScanSubmitter(submit func(string) bool) {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.logRequests(s.recover(s.securityHeaders(s.mux)))
+	return s.logRequests(s.recover(s.securityHeaders(gzipCourseTree(s.mux))))
 }
 
 type statusWriter struct {
@@ -249,12 +249,12 @@ func (s *Server) items(r *http.Request) ([]scanner.Item, error) {
 	return s.store.Items(r.Context(), s.libraryID)
 }
 func (s *Server) courseTree(w http.ResponseWriter, r *http.Request) {
-	items, e := s.items(r)
+	id := r.PathValue("courseID")
+	items, e := s.store.CourseItems(r.Context(), s.libraryID, id)
 	if e != nil {
 		writeError(w, 500, "internal_error", "Could not read indexed items.")
 		return
 	}
-	id := r.PathValue("courseID")
 	var course *scanner.Item
 	for i := range items {
 		if items[i].ID == id && items[i].Type == "course" {
@@ -272,7 +272,13 @@ func (s *Server) courseTree(w http.ResponseWriter, r *http.Request) {
 	}
 	var build func(scanner.Item) map[string]any
 	var buildAssetChildren func(string) []map[string]any
+	sectionCount, lessonCount := 0, 0
 	build = func(it scanner.Item) map[string]any {
+		if it.Type == "section" {
+			sectionCount++
+		} else if it.Type == "lesson" {
+			lessonCount++
+		}
 		obj := map[string]any{"id": it.ID, "type": it.Type, "title": it.Title, "originalName": it.OriginalName, "position": it.Position, "mimeType": it.MimeType, "extension": it.Extension, "sizeBytes": it.SizeBytes}
 		if it.Type == "subtitle" {
 			obj["contentUrl"] = "/api/v1/assets/" + it.ID + "/content"
@@ -335,31 +341,13 @@ func (s *Server) courseTree(w http.ResponseWriter, r *http.Request) {
 		return out
 	}
 	tree := build(*course)
-	tree["summary"] = map[string]int{"sectionCount": countTypes(items, id, "section"), "lessonCount": countTypes(items, id, "lesson")}
+	tree["summary"] = map[string]int{"sectionCount": sectionCount, "lessonCount": lessonCount}
 	writeJSON(w, 200, tree)
 }
-func countTypes(items []scanner.Item, root, typ string) int {
-	parents := map[string][]scanner.Item{}
-	for _, it := range items {
-		parents[it.ParentID] = append(parents[it.ParentID], it)
-	}
-	var count int
-	var walk func(string)
-	walk = func(p string) {
-		for _, it := range parents[p] {
-			if it.Type == typ {
-				count++
-			}
-			walk(it.ID)
-		}
-	}
-	walk(root)
-	return count
-}
 
-// lessonIDsUnder returns the set of lesson item IDs anywhere beneath a course,
-// mirroring the parent-chain walk used by countTypes. Progress is only tracked
-// for lessons, so this bounds what a course-progress response may contain.
+// lessonIDsUnder returns the set of lesson item IDs anywhere beneath a course.
+// Progress is only tracked for lessons, so this bounds what a course-progress
+// response may contain.
 func lessonIDsUnder(items []scanner.Item, root string) map[string]bool {
 	children := map[string][]scanner.Item{}
 	for _, it := range items {
@@ -473,20 +461,13 @@ func (s *Server) courseProgress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_request", "A X-Medina-Profile header is required.")
 		return
 	}
-	items, e := s.items(r)
+	id := r.PathValue("courseID")
+	items, e := s.store.CourseItems(r.Context(), s.libraryID, id)
 	if e != nil {
 		writeError(w, 500, "internal_error", "Could not read indexed items.")
 		return
 	}
-	id := r.PathValue("courseID")
-	var found bool
-	for i := range items {
-		if items[i].ID == id && items[i].Type == "course" {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if len(items) == 0 {
 		writeError(w, 404, "item_not_found", "Course not found.")
 		return
 	}

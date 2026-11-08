@@ -5,11 +5,72 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"medina/internal/scanner"
 )
+
+func TestCourseItemsRestrictsReadToCourseSubtree(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"Course A/Section/notes.txt": "a",
+		"Course B/Section/notes.txt": "b",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "course-items.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.EnsureLibrary(ctx, "library_default", "Test", root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Scan(ctx, "library_default", root); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.Items(ctx, "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var courseA string
+	for _, item := range all {
+		if item.Type == "course" && item.OriginalName == "Course A" {
+			courseA = item.ID
+		}
+	}
+	if courseA == "" {
+		t.Fatal("Course A was not indexed")
+	}
+	got, err := store.CourseItems(ctx, "library_default", courseA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("CourseItems returned %d entries, want the course, section directory, and asset", len(got))
+	}
+	for _, item := range got {
+		if item.RelativePath != "Course A" && !strings.HasPrefix(item.RelativePath, "Course A/") {
+			t.Errorf("CourseItems leaked other course entry %q", item.RelativePath)
+		}
+	}
+	missing, err := store.CourseItems(ctx, "library_default", "missing-course")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("unknown course returned %d entries", len(missing))
+	}
+}
 
 func TestParseMediaDuration(t *testing.T) {
 	for _, tc := range []struct {
