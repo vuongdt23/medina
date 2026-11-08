@@ -33,10 +33,13 @@ RUN case "$BUNDLE_FRONTEND" in \
     && mkdir -p /out/data \
     && chown -R 65532:65532 /out/data
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM alpine:3.21
+RUN apk add --no-cache ffmpeg \
+    && mkdir -p /data \
+    && chown 65532:65532 /data
 WORKDIR /
 COPY --from=go-build /out/medina /medina
-COPY --from=go-build --chown=nonroot:nonroot /out/data /data
+USER 65532:65532
 ENV BIND_ADDRESS=0.0.0.0:17843 \
     CONTENT_ROOT=/library \
     DATABASE_PATH=/data/course-media.sqlite \

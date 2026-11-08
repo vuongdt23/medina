@@ -62,6 +62,7 @@ Medina scans at startup, watches for changes, and periodically reconciles the li
 ## Things to know
 
 - **No authentication.** Keep Medina on loopback or a trusted network. Docker publishes the app on host loopback by default.
+- **Lesson durations.** The server uses `ffprobe` to read media duration metadata during indexing and caches it in SQLite, probing only new or changed lessons on later scans. The Docker image includes `ffprobe`; local server runs need it on `PATH` for duration labels.
 - **No transcoding.** Playback depends on your browser's codec support.
 - **Safe previews.** Source files, common images, and PDFs can be previewed; active documents such as HTML and SVG are download-only.
 - **Folder ZIPs.** Downloads use temporary storage outside the library, cleaned up afterward. Limits: 10,000 files, 2 GiB of source data, and 512 MiB compressed. Leave enough space in the OS temporary directory.
@@ -72,7 +73,7 @@ Medina scans at startup, watches for changes, and periodically reconciles the li
 make test       # Go tests
 make vet        # Go static checks
 make web-dev    # Vite UI; proxies API requests to localhost:17843
-make macos-test # Swift API/domain and VLC playback tests
+make macos-test # Swift API/domain and libmpv playback tests
 make macos-build # Generate and build the native macOS app (macOS/Xcode required)
 ```
 
@@ -80,9 +81,9 @@ Run the backend separately with `CONTENT_ROOT=/path/to/courses go run ./cmd/medi
 
 API documentation: **[/swagger/](http://127.0.0.1:17843/swagger/)**. The source specification is [`api/openapi.yaml`](api/openapi.yaml).
 
-The native macOS client is under active development. Its XcodeGen source is [`native/macos/project.yml`](native/macos/project.yml); testable API/domain code is in [`Packages/MedinaCore`](Packages/MedinaCore), and playback is in [`Packages/MedinaPlayback`](Packages/MedinaPlayback). The client uses SwiftVLC as its single player engine, with Medina-owned transport, track-selection, and fullscreen controls.
+The native macOS client is under active development. Its XcodeGen source is [`native/macos/project.yml`](native/macos/project.yml); testable API/domain code is in [`Packages/MedinaCore`](Packages/MedinaCore), and playback is in [`Packages/MedinaPlayback`](Packages/MedinaPlayback). The client uses system libmpv through a small C interoperability shim, with Medina-owned transport, track-selection, and fullscreen controls.
 
-The native playback workspace adapts to resizing and macOS tiling, with a resizable sidebar on larger windows and temporary course navigation on compact ones. It includes lesson search (⌘F), comfortable/compact outline density, dark Focus mode, VLC on-screen controls, and an auto-play preference. See [workspace behavior and the manual verification checklist](native/macos/README.md).
+The native playback workspace adapts to resizing and macOS tiling, with a resizable sidebar on larger windows and temporary course navigation on compact ones. It includes lesson search (⌘F), comfortable/compact outline density, dark Focus mode, libmpv on-screen controls, and an auto-play preference. See [workspace behavior and the manual verification checklist](native/macos/README.md).
 
 ### Optional logging stack
 

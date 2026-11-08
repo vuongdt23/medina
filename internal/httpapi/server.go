@@ -281,6 +281,9 @@ func (s *Server) courseTree(w http.ResponseWriter, r *http.Request) {
 			obj["mediaKind"] = it.MediaKind
 			obj["mimeType"] = it.MimeType
 			obj["streamUrl"] = "/api/v1/lessons/" + it.ID + "/content"
+			if it.DurationSeconds > 0 {
+				obj["durationSeconds"] = it.DurationSeconds
+			}
 		}
 		var sub, assets, sections, lessons []map[string]any
 		if it.Type == "asset_directory" {

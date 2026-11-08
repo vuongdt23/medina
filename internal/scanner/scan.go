@@ -16,23 +16,24 @@ import (
 )
 
 type Item struct {
-	ID           string    `json:"id"`
-	ParentID     string    `json:"parentId,omitempty"`
-	Type         string    `json:"type"`
-	Title        string    `json:"title"`
-	OriginalName string    `json:"originalName"`
-	RelativePath string    `json:"relativePath"`
-	SortKey      string    `json:"sortKey"`
-	Position     int       `json:"position"`
-	Depth        int       `json:"depth"`
-	SizeBytes    int64     `json:"sizeBytes,omitempty"`
-	ModifiedAt   time.Time `json:"modifiedAt,omitempty"`
-	MimeType     string    `json:"mimeType,omitempty"`
-	Extension    string    `json:"extension,omitempty"`
-	MediaKind    string    `json:"mediaKind,omitempty"`
-	SubtitleFor  string    `json:"subtitleFor,omitempty"`
-	LessonID     string    `json:"lessonId,omitempty"`
-	Available    bool      `json:"available"`
+	ID              string    `json:"id"`
+	ParentID        string    `json:"parentId,omitempty"`
+	Type            string    `json:"type"`
+	Title           string    `json:"title"`
+	OriginalName    string    `json:"originalName"`
+	RelativePath    string    `json:"relativePath"`
+	SortKey         string    `json:"sortKey"`
+	Position        int       `json:"position"`
+	Depth           int       `json:"depth"`
+	SizeBytes       int64     `json:"sizeBytes,omitempty"`
+	DurationSeconds float64   `json:"durationSeconds,omitempty"`
+	ModifiedAt      time.Time `json:"modifiedAt,omitempty"`
+	MimeType        string    `json:"mimeType,omitempty"`
+	Extension       string    `json:"extension,omitempty"`
+	MediaKind       string    `json:"mediaKind,omitempty"`
+	SubtitleFor     string    `json:"subtitleFor,omitempty"`
+	LessonID        string    `json:"lessonId,omitempty"`
+	Available       bool      `json:"available"`
 }
 
 type Result struct {

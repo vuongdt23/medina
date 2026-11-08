@@ -81,7 +81,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: Recursive course tree }
+        '200': { description: Recursive course tree; lesson nodes include durationSeconds when media metadata is available }
   /courses/{courseID}/progress:
     get:
       summary: Aggregate lesson progress for a course
@@ -135,7 +135,7 @@ paths:
         '400': { description: Missing X-Medina-Profile header }
     put:
       summary: Store playback progress for one lesson
-      description: Upserts the per-profile progress record. Duration is reported by the client (the API does not probe media). Requires an X-Medina-Profile header.
+      description: Upserts the per-profile progress record. Duration is reported by the client; indexed lesson nodes may also include durationSeconds from server-side media metadata. Requires an X-Medina-Profile header.
       parameters:
         - in: path
           name: itemID

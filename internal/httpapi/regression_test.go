@@ -151,6 +151,43 @@ func TestAssetTreeSerializesEachItemOnce(t *testing.T) {
 	}
 }
 
+func TestCourseTreeIncludesCachedLessonDuration(t *testing.T) {
+	server, store, _ := regressionServer(t, map[string]string{"Course/lesson.mp4": "not real media"})
+	items, err := store.Items(context.Background(), "library_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var courseID, lessonID string
+	for _, item := range items {
+		switch item.Type {
+		case "course":
+			courseID = item.ID
+		case "lesson":
+			lessonID = item.ID
+		}
+	}
+	if courseID == "" || lessonID == "" {
+		t.Fatalf("missing indexed course or lesson: course=%q lesson=%q", courseID, lessonID)
+	}
+	if _, err := store.DB.ExecContext(context.Background(), `UPDATE entry_snapshots SET duration_seconds=? WHERE generation_id=(SELECT active_generation_id FROM library_roots WHERE id=?) AND item_id=?`, 123.5, "library_default", lessonID); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/courses/"+courseID+"/tree", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var tree map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &tree); err != nil {
+		t.Fatal(err)
+	}
+	lessons := tree["lessons"].([]any)
+	lesson := lessons[0].(map[string]any)
+	if lesson["durationSeconds"] != 123.5 {
+		t.Fatalf("tree durationSeconds = %v, want 123.5: %s", lesson["durationSeconds"], rec.Body.String())
+	}
+}
+
 func TestCoursesPaginateInNaturalOrder(t *testing.T) {
 	server, _, _ := regressionServer(t, map[string]string{"Course 1/readme.txt": "", "Course 2/readme.txt": "", "Course 10/readme.txt": ""})
 	cursor := ""

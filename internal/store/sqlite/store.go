@@ -165,9 +165,11 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 	if err != nil {
 		return "", err
 	}
+	baselineItems := make(map[string]scanner.Item, len(baseline))
 	known := make(map[string]scanner.Item, len(baseline))
 	knownPaths := make(map[string]bool, len(baseline))
 	for _, item := range baseline {
+		baselineItems[item.ID] = item
 		known[item.ID] = item
 		knownPaths[item.RelativePath] = true
 	}
@@ -187,8 +189,8 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 		return "", err
 	}
 	if previous.Valid {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO entry_snapshots(generation_id,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available)
-			SELECT ?,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available FROM entry_snapshots WHERE generation_id=?`, generation, previous.String); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO entry_snapshots(generation_id,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available,duration_seconds)
+			SELECT ?,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available,duration_seconds FROM entry_snapshots WHERE generation_id=?`, generation, previous.String); err != nil {
 			tx.Rollback()
 			return "", err
 		}
@@ -226,6 +228,9 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 		}
 	}
 	result, err := scanner.ScanWithOptions(ctx, root, options, func(batch []scanner.Item, canonical bool) error {
+		for i := range batch {
+			reuseLessonDuration(&batch[i], baselineItems)
+		}
 		changed := make([]scanner.Item, 0, len(batch))
 		for _, item := range batch {
 			// Keep published parent links and types during enumeration. Only
@@ -253,6 +258,22 @@ func (s *Store) ScanWithOptions(ctx context.Context, libraryID, root string, opt
 	})
 	if err != nil {
 		return "", err
+	}
+	probeMissingLessonDurations(ctx, root, result.Items, baselineItems)
+	var durationUpdates []scanner.Item
+	for _, item := range result.Items {
+		if item.Type == "lesson" && item.DurationSeconds > 0 {
+			prior, ok := baselineItems[item.ID]
+			if !ok || prior.SizeBytes != item.SizeBytes || !prior.ModifiedAt.Equal(item.ModifiedAt) || prior.DurationSeconds != item.DurationSeconds {
+				durationUpdates = append(durationUpdates, item)
+			}
+		}
+	}
+	for start := 0; start < len(durationUpdates); start += 256 {
+		end := min(start+256, len(durationUpdates))
+		if err := s.writeScanBatch(ctx, libraryID, generation, durationUpdates[start:end], true); err != nil {
+			return "", err
+		}
 	}
 	currentProgress.Phase = "publishing"
 	s.setProgress(libraryID, currentProgress)
@@ -384,18 +405,18 @@ func (s *Store) writeScanBatch(ctx context.Context, libraryID, generation string
 				}
 			}
 		}
-		_, err := exec(`INSERT INTO entry_snapshots(generation_id,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		_, err := exec(`INSERT INTO entry_snapshots(generation_id,item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available,duration_seconds)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(generation_id,item_id) DO UPDATE SET
 				parent_item_id=excluded.parent_item_id,entry_type=excluded.entry_type,
 				original_name=excluded.original_name,title=excluded.title,sort_key=excluded.sort_key,
 				position=excluded.position,depth=excluded.depth,size_bytes=excluded.size_bytes,
 				modified_at=excluded.modified_at,mime_type=excluded.mime_type,extension=excluded.extension,
 				media_kind=excluded.media_kind,lesson_id=excluded.lesson_id,subtitle_for=excluded.subtitle_for,
-				available=excluded.available`,
+				available=excluded.available,duration_seconds=excluded.duration_seconds`,
 			generation, it.ID, nullIfEmpty(it.ParentID), it.Type, it.OriginalName, it.Title, it.RelativePath,
 			it.SortKey, it.Position, it.Depth, it.SizeBytes, it.ModifiedAt.UTC().Format(time.RFC3339Nano),
-			it.MimeType, it.Extension, it.MediaKind, nullIfEmpty(it.LessonID), nullIfEmpty(it.SubtitleFor), it.Available)
+			it.MimeType, it.Extension, it.MediaKind, nullIfEmpty(it.LessonID), nullIfEmpty(it.SubtitleFor), it.Available, it.DurationSeconds)
 		if err != nil {
 			return err
 		}
@@ -427,7 +448,7 @@ func (s *Store) itemsWhere(ctx context.Context, libraryID, filter string, args [
 		return []scanner.Item{}, nil
 	}
 	args = append([]any{gen.String}, args...)
-	rows, err := s.DB.QueryContext(ctx, `SELECT item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available FROM entry_snapshots WHERE generation_id=?`+filter, args...)
+	rows, err := s.DB.QueryContext(ctx, `SELECT item_id,parent_item_id,entry_type,original_name,title,relative_path,sort_key,position,depth,size_bytes,modified_at,mime_type,extension,media_kind,lesson_id,subtitle_for,available,duration_seconds FROM entry_snapshots WHERE generation_id=?`+filter, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -437,13 +458,15 @@ func (s *Store) itemsWhere(ctx context.Context, libraryID, filter string, args [
 		var it scanner.Item
 		var parent, modified, mimeType, ext, kind, lesson, subtitle sql.NullString
 		var size int64
+		var duration float64
 		var available int
-		err = rows.Scan(&it.ID, &parent, &it.Type, &it.OriginalName, &it.Title, &it.RelativePath, &it.SortKey, &it.Position, &it.Depth, &size, &modified, &mimeType, &ext, &kind, &lesson, &subtitle, &available)
+		err = rows.Scan(&it.ID, &parent, &it.Type, &it.OriginalName, &it.Title, &it.RelativePath, &it.SortKey, &it.Position, &it.Depth, &size, &modified, &mimeType, &ext, &kind, &lesson, &subtitle, &available, &duration)
 		if err != nil {
 			return nil, err
 		}
 		it.ParentID = parent.String
 		it.SizeBytes = size
+		it.DurationSeconds = duration
 		it.MimeType = mimeType.String
 		it.Extension = ext.String
 		it.MediaKind = kind.String
