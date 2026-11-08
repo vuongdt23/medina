@@ -170,6 +170,21 @@ Manual acceptance checklist (requires the app and playable course media):
     remote HTTP lesson, and check the loading/error states for unsupported media.
 15. Tab to the seek slider and use arrow keys or VoiceOver adjustments; playback
     must seek immediately without requiring a mouse release.
+16. Open the Library at wide, standard, and 480 × 360 pt sizes. Confirm the
+    hierarchy remains search, Continue Watching when available, then All Courses,
+    without clipped connection controls or unusable cards.
+17. Search globally for a course, lesson, section, and resource. Verify grouped
+    results, breadcrumbs, direct navigation/playback, Return-to-open, Escape to
+    clear, and the labeled course-title fallback when the endpoint is unavailable.
+18. Resume a Continue Watching entry and verify it opens the owning course and
+    seeks to the persisted position. Complete it and confirm the card disappears
+    without blocking the rest of the Library.
+19. Check course, search, and recent cards with available, missing, and failed
+    thumbnails. Generated covers/type icons must remain visible as fallbacks, and
+    switching server origins must not briefly show images from the prior server.
+20. Verify every course card shows its own progress summary. Routine playback
+    updates must not reopen completed lessons; natural completion must remain
+    sticky after leaving and reopening the course.
 
 Physical display transitions and live libmpv rendering require manual validation;
 unit tests do not substitute for those checks.

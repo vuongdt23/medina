@@ -106,6 +106,15 @@ struct CourseOutline: View {
                         withAnimation { proxy.scrollTo(id, anchor: .center) }
                     }
                 }
+                .onChange(of: model.itemSelectionRevision) { _, _ in
+                    guard let id = model.selectedItemID else { return }
+                    search = ""
+                    revealSelectedItem(id: id)
+                    Task { @MainActor in
+                        await Task.yield()
+                        withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    }
+                }
             }
             progressFooter
         }
@@ -264,6 +273,63 @@ struct CourseOutline: View {
         withAnimation(.easeInOut(duration: 0.2)) { toOpen.forEach { expandedSections.insert($0) } }
     }
 
+    private func revealSelectedItem(id: String) {
+        guard preparedForTree != nil else { return }
+
+        func resourcePath(_ nodes: [TreeNode], target: String, folders: inout [String]) -> Bool {
+            for node in nodes {
+                if node.id == target { return true }
+                if node.type == "asset_directory" {
+                    folders.append(node.id)
+                    if resourcePath(node.children ?? [], target: target, folders: &folders) { return true }
+                    folders.removeLast()
+                }
+            }
+            return false
+        }
+
+        var sectionsToOpen: [String] = []
+        var resourceGroupsToOpen: [String] = []
+        var foldersToOpen: [String] = []
+
+        func search(_ group: SectionGroup, ancestors: [String]) -> Bool {
+            if group.id == id {
+                sectionsToOpen = ancestors
+                return true
+            }
+            if group.directLessons.contains(where: { $0.id == id }) {
+                sectionsToOpen = ancestors + (group.isSynthetic ? [] : [group.id])
+                return true
+            }
+            var folders: [String] = []
+            if resourcePath(group.resources, target: id, folders: &folders) {
+                sectionsToOpen = ancestors + (group.isSynthetic ? [] : [group.id])
+                resourceGroupsToOpen = ["\(group.id)#resources"]
+                foldersToOpen = folders
+                return true
+            }
+            for case .subsection(let subsection) in group.children {
+                let next = ancestors + (group.isSynthetic ? [] : [group.id])
+                if search(subsection, ancestors: next) { return true }
+            }
+            return false
+        }
+
+        for group in groups where search(group, ancestors: []) { break }
+        if sectionsToOpen.isEmpty && resourceGroupsToOpen.isEmpty {
+            var folders: [String] = []
+            if resourcePath(courseResources, target: id, folders: &folders) {
+                resourceGroupsToOpen = ["\(tree.id)#course-resources"]
+                foldersToOpen = folders
+            }
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            sectionsToOpen.forEach { expandedSections.insert($0) }
+            resourceGroupsToOpen.forEach { expandedResources.insert($0) }
+            foldersToOpen.forEach { expandedResources.insert($0) }
+        }
+    }
+
     // MARK: Resume header
 
     @ViewBuilder private var resumeHeader: some View {
@@ -376,6 +442,7 @@ struct SectionBlock: View {
                     .strokeBorder(containsCurrentLesson ? Theme.accent.opacity(0.22) : Theme.hairline(scheme))
             }
         }
+        .id(group.id)
     }
 
     private func lessonRow(_ lesson: TreeNode) -> some View {
@@ -532,6 +599,7 @@ struct ResourceDisclosure: View {
                 ResourceTree(nodes: resources, depth: 0, model: model, expandedResources: $expandedResources)
             }
         }
+        .id(id)
     }
 }
 
@@ -601,6 +669,7 @@ struct ResourceFolderRow: View {
                 ResourceTree(nodes: children, depth: depth + 1, model: model, expandedResources: $expandedResources)
             }
         }
+        .id(node.id)
     }
 
     @MainActor private func downloadZip() async {
@@ -647,6 +716,7 @@ struct ResourceFileRow: View {
         .onTapGesture { model.selectAsset(node) }
         .onHover { isHovering = $0 }
         .help(node.originalName ?? node.title)
+        .id(node.id)
     }
 
     @MainActor private func download() async {

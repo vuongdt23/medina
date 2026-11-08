@@ -2,7 +2,56 @@ import Foundation
 import XCTest
 @testable import MedinaCore
 
+private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else { throw MedinaAPIError.invalidResponse }
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private func bodyData(from request: URLRequest) -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return Data() }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        guard count > 0 else { break }
+        data.append(buffer, count: count)
+    }
+    return data
+}
+
 final class MedinaCoreTests: XCTestCase {
+    override func tearDown() {
+        MockURLProtocol.handler = nil
+        super.tearDown()
+    }
+
+    private func mockClient() -> MedinaAPIClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        return MedinaAPIClient(
+            profile: ServerProfile(origin: URL(string: "http://medina.test:17843")!),
+            session: URLSession(configuration: configuration)
+        )
+    }
     func testNullableAndMissingCollectionsDecode() throws {
         let json = #"{"id":"course","type":"course","title":"Course","items":null,"children":null,"lessons":[{"id":"lesson","type":"lesson","title":"Lesson"}]}"#.data(using: .utf8)!
         let node = try JSONDecoder().decode(TreeNode.self, from: json)
@@ -84,10 +133,83 @@ final class MedinaCoreTests: XCTestCase {
         XCTAssertEqual(p.fraction, 0.45, accuracy: 0.0001)
         XCTAssertFalse(p.isEffectivelyComplete)
         p.positionSeconds = 95
-        XCTAssertTrue(p.isEffectivelyComplete, "reaching the last 10% counts as complete")
+        XCTAssertTrue(p.isEffectivelyComplete, "reaching the last 5% counts as complete")
         let flagged = LessonProgress(itemId: "b", positionSeconds: 1, durationSeconds: 0, completed: true)
         XCTAssertTrue(flagged.isEffectivelyComplete, "explicit completion wins without a duration")
         XCTAssertEqual(flagged.fraction, 1)
+    }
+
+    func testCourseSearchRecentAndThumbnailFieldsDecode() throws {
+        let course = try JSONDecoder().decode(Course.self, from: #"{"id":"course","title":"Course","thumbnailUrl":"/thumb","progress":{"completedCount":3,"totalCount":4,"percent":75}}"#.data(using: .utf8)!)
+        XCTAssertEqual(course.thumbnailUrl, "/thumb")
+        XCTAssertEqual(course.progress?.fraction ?? 0, 0.75, accuracy: 0.0001)
+
+        let node = try JSONDecoder().decode(TreeNode.self, from: #"{"id":"lesson","type":"lesson","title":"Lesson","thumbnailUrl":"/lesson-thumb"}"#.data(using: .utf8)!)
+        XCTAssertEqual(node.thumbnailUrl, "/lesson-thumb")
+
+        let search = try JSONDecoder().decode(SearchResponse.self, from: #"{"query":"swift","items":[{"id":"lesson","type":"lesson","title":"Swift","courseId":"course","coursePath":"Course / Intro","streamUrl":"/stream","thumbnailUrl":"/thumb"}]}"#.data(using: .utf8)!)
+        XCTAssertEqual(search.items.first?.courseId, "course")
+        XCTAssertEqual(search.items.first?.thumbnailUrl, "/thumb")
+
+        let recent = try JSONDecoder().decode(RecentProgressResponse.self, from: #"{"items":[{"itemId":"lesson","title":"Swift","courseId":"course","coursePath":"Course / Intro","positionSeconds":25,"durationSeconds":100,"completed":false,"updatedAt":"2026-01-01T00:00:00Z","streamUrl":"/stream"}]}"#.data(using: .utf8)!)
+        XCTAssertEqual(recent.items.first?.fraction ?? 0, 0.25, accuracy: 0.0001)
+    }
+
+    func testClientSendsProfileForCoursesAndRecentProgress() async throws {
+        let client = mockClient()
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Medina-Profile"), "profile-id")
+            let path = request.url?.path ?? ""
+            let body: String
+            if path.hasSuffix("/courses") {
+                body = #"{"items":[{"id":"course","title":"Course","progress":{"completedCount":1,"totalCount":2,"percent":50}}],"nextCursor":null}"#
+            } else {
+                XCTAssertEqual(path, "/api/v1/progress/recent")
+                body = #"{"items":[]}"#
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let courses = try await client.courses(libraryID: "library", profileID: "profile-id")
+        XCTAssertEqual(courses.first?.progress?.percent, 50)
+        let recent = try await client.recentProgress(profileID: "profile-id")
+        XCTAssertEqual(recent.count, 0)
+    }
+
+    func testThumbnailLoaderResolvesRelativeURLAndUsesHTTPImageRequest() async throws {
+        let client = mockClient()
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "http://medina.test:17843/api/v1/lessons/one/thumbnail")
+            XCTAssertEqual(request.cachePolicy, .useProtocolCachePolicy)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "image/*")
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                    headerFields: ["Cache-Control": "public, max-age=3600", "ETag": "test"])!,
+                    Data([1, 2, 3]))
+        }
+        let data = try await client.thumbnailData(at: "/api/v1/lessons/one/thumbnail")
+        XCTAssertEqual(data, Data([1, 2, 3]))
+    }
+
+    func testSearchEncodesQueryAndProgressCompletionIsOptional() async throws {
+        let client = mockClient()
+        var progressBodies: [[String: Any]] = []
+        MockURLProtocol.handler = { request in
+            if request.url?.path == "/api/v1/search" {
+                let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+                XCTAssertEqual(components?.queryItems?.first(where: { $0.name == "q" })?.value, "swift & ui")
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"query":"swift & ui","items":[]}"#.utf8))
+            }
+            let object = try JSONSerialization.jsonObject(with: bodyData(from: request)) as! [String: Any]
+            progressBodies.append(object)
+            let response = #"{"itemId":"lesson","positionSeconds":25,"durationSeconds":100,"completed":false}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(response.utf8))
+        }
+
+        _ = try await client.search(query: "swift & ui")
+        let record = LessonProgress(itemId: "lesson", positionSeconds: 25, durationSeconds: 100)
+        _ = try await client.putLessonProgress(id: "lesson", profileID: "profile", record)
+        _ = try await client.putLessonProgress(id: "lesson", profileID: "profile", record, completed: true)
+        XCTAssertNil(progressBodies[0]["completed"], "routine updates must omit completed")
+        XCTAssertEqual(progressBodies[1]["completed"] as? Bool, true)
     }
 
     func testCourseProgressFraction() {

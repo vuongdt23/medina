@@ -62,7 +62,15 @@ final class LibraryModel {
     var isWorking = false
     var courseProgress: CourseProgress = .empty
     var progressEnabled = false
+    var thumbnailsEnabled = false
     var courseSearch = ""
+    var searchResults: [SearchResult] = []
+    var searchIsLoading = false
+    var searchMessage: String?
+    var searchUsesLocalFallback = false
+    var recentItems: [RecentProgressItem] = []
+    var recentIsLoading = false
+    var recentMessage: String?
     var autoplayNext = UserDefaults.standard.object(forKey: "autoplayNext") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoplayNext, forKey: "autoplayNext") }
     }
@@ -85,6 +93,8 @@ final class LibraryModel {
     private var cache: LibraryCache?
     private var treeRequestToken = UUID()
     private var connectionToken = UUID()
+    private var searchRequestToken = UUID()
+    private var recentRequestToken = UUID()
 
     func connect() async {
         let token = UUID()
@@ -96,10 +106,31 @@ final class LibraryModel {
             let normalized = try ServerProfile.normalizedOrigin(origin)
             origin = normalized.absoluteString
             UserDefaults.standard.set(origin, forKey: "serverOrigin")
-            if UserDefaults.standard.string(forKey: "profileOrigin") != origin {
+            let previousProfileOrigin = UserDefaults.standard.string(forKey: "profileOrigin")
+            if previousProfileOrigin != origin {
+                stopPlayback()
+                route = .library
                 profileID = UUID()
                 UserDefaults.standard.set(profileID.uuidString, forKey: "medinaProfileID")
                 UserDefaults.standard.set(origin, forKey: "profileOrigin")
+                searchRequestToken = UUID()
+                recentRequestToken = UUID()
+                client = nil
+                info = nil
+                status = nil
+                libraries = []
+                courses = []
+                tree = nil
+                selectedCourseID = nil
+                UserDefaults.standard.removeObject(forKey: "selectedCourseID")
+                selectedItemID = nil
+                selectedAsset = nil
+                searchResults = []
+                searchMessage = nil
+                recentItems = []
+                recentMessage = nil
+            } else {
+                client = nil
             }
             let profile = ServerProfile(id: profileID, origin: normalized)
             let cache = LibraryCache(profileID: profileID)
@@ -115,12 +146,13 @@ final class LibraryModel {
             info = try await api.systemInfo()
             guard connectionToken == token else { return }
             progressEnabled = info?.capabilities?["progress"] == true
+            thumbnailsEnabled = info?.capabilities?["thumbnails"] == true
             libraries = try await api.libraries()
             guard connectionToken == token else { return }
             guard let library = libraries.first else { throw MedinaAPIError.noLibrary }
             self.client = api
             self.status = try? await api.indexStatus()
-            courses = try await api.courses(libraryID: library.id)
+            courses = try await api.courses(libraryID: library.id, profileID: progressEnabled ? profileIdentifier : nil)
             guard connectionToken == token else { return }
             connectionMessage = "Connected · API \(info?.apiVersion ?? "?")"
             AppSettings.shared.logInfo("Connected to Medina API \(info?.apiVersion ?? "?")", category: "connection")
@@ -128,6 +160,10 @@ final class LibraryModel {
             errorMessage = nil
             showConnectionSheet = false
             persistCache()
+            await loadRecent()
+            if !courseSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                await performLibrarySearch(courseSearch)
+            }
             if let selectedCourseID {
                 await loadTree(courseID: selectedCourseID, token: treeRequestToken)
                 await loadProgress(courseID: selectedCourseID)
@@ -143,6 +179,7 @@ final class LibraryModel {
                 courses = cached.courses
                 if let selectedCourseID { tree = cached.trees[selectedCourseID] }
             }
+            recentMessage = progressEnabled ? "Continue Watching is unavailable while offline." : nil
         }
     }
 
@@ -240,13 +277,19 @@ final class LibraryModel {
         let position = engine.currentTime
         let duration = engine.duration
         AppSettings.shared.logDebug("Progress for '\(lesson.title)': \(Int(position))s / \(Int(duration))s", category: "progress")
-        let complete = duration > 0 && position / duration >= 0.9
-        var record = LessonProgress(itemId: lesson.id, positionSeconds: position,
+        let alreadyComplete = courseProgress.lessons[lesson.id]?.completed == true
+        let complete = alreadyComplete || (duration > 0 && position / duration >= 0.95)
+        let record = LessonProgress(itemId: lesson.id, positionSeconds: position,
                                     durationSeconds: duration, completed: complete)
         updateLocalProgress(record)
         Task { [profileIdentifier] in
-            if let stored = try? await client.putLessonProgress(id: lesson.id, profileID: profileIdentifier, record) {
-                record = stored
+            do {
+                let stored = try await client.putLessonProgress(id: lesson.id, profileID: profileIdentifier, record)
+                guard self.profileIdentifier == profileIdentifier else { return }
+                updateLocalProgress(stored)
+                await loadRecent()
+            } catch {
+                // Progress is best effort; keep the optimistic local state.
             }
         }
     }
@@ -259,7 +302,15 @@ final class LibraryModel {
         updateLocalProgress(record)
         lastReportedLessonID = lesson.id
         Task { [profileIdentifier] in
-            _ = try? await client.putLessonProgress(id: lesson.id, profileID: profileIdentifier, record)
+            do {
+                let stored = try await client.putLessonProgress(id: lesson.id, profileID: profileIdentifier,
+                                                                record, completed: true)
+                guard self.profileIdentifier == profileIdentifier else { return }
+                updateLocalProgress(stored)
+                await loadRecent()
+            } catch {
+                // Natural-end completion remains reflected locally.
+            }
         }
     }
 
@@ -269,12 +320,26 @@ final class LibraryModel {
         var next = courseProgress
         let wasComplete = next.lessons[record.itemId]?.isEffectivelyComplete ?? false
         next.lessons[record.itemId] = record
-        if record.isEffectivelyComplete && !wasComplete {
+        let isComplete = record.isEffectivelyComplete
+        if isComplete && !wasComplete {
             next.completedCount = min(next.totalCount == 0 ? next.completedCount + 1 : next.totalCount,
                                       next.completedCount + 1)
             outlineRevision &+= 1
+        } else if !isComplete && wasComplete {
+            next.completedCount = max(0, next.completedCount - 1)
+            outlineRevision &+= 1
         }
         courseProgress = next
+        updateSelectedCourseSummary(from: next)
+    }
+
+    private func updateSelectedCourseSummary(from progress: CourseProgress) {
+        guard let selectedCourseID,
+              let index = courses.firstIndex(where: { $0.id == selectedCourseID }) else { return }
+        let percent = progress.totalCount > 0 ? Int((progress.fraction * 100).rounded()) : 0
+        courses[index].progress = CourseProgressSummary(completedCount: progress.completedCount,
+                                                        totalCount: progress.totalCount,
+                                                        percent: percent)
     }
 
     private func loadQueuedLesson(_ lesson: TreeNode, userInitiated: Bool = true) {
@@ -336,6 +401,109 @@ final class LibraryModel {
     func backToLibrary() {
         stopPlayback()
         route = .library
+        Task { await loadRecent() }
+    }
+
+    func performLibrarySearch(_ rawQuery: String) async {
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = UUID()
+        searchRequestToken = token
+        guard !query.isEmpty else {
+            searchResults = []
+            searchIsLoading = false
+            searchMessage = nil
+            searchUsesLocalFallback = false
+            return
+        }
+
+        searchIsLoading = true
+        do { try await Task.sleep(for: .milliseconds(250)) }
+        catch { return }
+        guard searchRequestToken == token, !Task.isCancelled else { return }
+
+        guard let client else {
+            applyLocalSearch(query: query, message: "Offline — searching course titles only.")
+            return
+        }
+        do {
+            let response = try await client.search(query: query, limit: 100)
+            guard searchRequestToken == token, courseSearch.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            searchResults = response.items.filter {
+                ["course", "lesson", "section", "asset", "asset_directory"].contains($0.type)
+            }
+            searchMessage = searchResults.isEmpty ? "No library items match “\(query)”." : nil
+            searchUsesLocalFallback = false
+            searchIsLoading = false
+        } catch {
+            guard searchRequestToken == token else { return }
+            applyLocalSearch(query: query, message: "Global search is unavailable — showing matching course titles.")
+        }
+    }
+
+    private func applyLocalSearch(query: String, message: String) {
+        let lower = query.lowercased()
+        searchResults = courses.compactMap { course -> SearchResult? in
+            guard course.title.lowercased().contains(lower)
+                    || CourseName.clean(course.title).lowercased().contains(lower)
+                    || (course.originalName?.lowercased().contains(lower) ?? false) else { return nil }
+            return SearchResult(id: course.id, type: "course", title: course.title,
+                                originalName: course.originalName, courseId: course.id,
+                                coursePath: CourseName.clean(course.title), streamUrl: nil,
+                                thumbnailUrl: course.thumbnailUrl)
+        }
+        searchUsesLocalFallback = true
+        searchMessage = searchResults.isEmpty ? "\(message) No course titles match “\(query)”." : message
+        searchIsLoading = false
+    }
+
+    func loadRecent() async {
+        let token = UUID()
+        recentRequestToken = token
+        guard progressEnabled, let client else {
+            recentItems = []
+            recentIsLoading = false
+            return
+        }
+        recentIsLoading = recentItems.isEmpty
+        do {
+            let incoming = try await client.recentProgress(profileID: profileIdentifier, limit: 20)
+            guard recentRequestToken == token else { return }
+            recentItems = incoming.filter { !$0.completed }
+            recentMessage = nil
+            recentIsLoading = false
+        } catch {
+            guard recentRequestToken == token else { return }
+            recentMessage = "Continue Watching could not be refreshed."
+            recentIsLoading = false
+        }
+    }
+
+    func openSearchResult(_ result: SearchResult) async {
+        guard let course = courses.first(where: { $0.id == result.courseId || $0.id == result.id }) else { return }
+        await openCourse(course)
+        guard let tree else { return }
+        switch result.type {
+        case "lesson":
+            playLesson(id: result.id)
+        case "asset":
+            if let item = CourseTree.item(id: result.id, in: tree) { selectAsset(item) }
+        case "asset_directory":
+            selectItem(id: result.id)
+        case "section":
+            selectItem(id: result.id)
+        default:
+            break
+        }
+    }
+
+    func openRecent(_ item: RecentProgressItem) async {
+        guard let course = courses.first(where: { $0.id == item.courseId }) else { return }
+        await openCourse(course)
+        let record = LessonProgress(itemId: item.itemId, positionSeconds: item.positionSeconds,
+                                    durationSeconds: item.durationSeconds, completed: item.completed,
+                                    updatedAt: item.updatedAt)
+        updateLocalProgress(record)
+        playLesson(id: item.itemId)
     }
 
     /// Fetches aggregate course progress for the active profile. Progress is a
@@ -346,6 +514,7 @@ final class LibraryModel {
             let incoming = try await client.courseProgress(courseID: courseID, profileID: profileIdentifier)
             guard selectedCourseID == courseID else { return }
             courseProgress = incoming
+            updateSelectedCourseSummary(from: incoming)
             outlineRevision &+= 1
         } catch {
             // Keep whatever we had; progress is non-essential.
@@ -379,10 +548,16 @@ final class LibraryModel {
         do {
             let previousState = status?.state
             let updatedStatus = try await client.indexStatus()
-            status = updatedStatus
+            guard self.client === client else { return }
+            var updatedCourses = courses
             if let library = libraries.first {
-                courses = try await client.courses(libraryID: library.id)
+                updatedCourses = try await client.courses(libraryID: library.id,
+                                                          profileID: progressEnabled ? profileIdentifier : nil)
             }
+            guard self.client === client else { return }
+            status = updatedStatus
+            courses = updatedCourses
+            await loadRecent()
             let refreshTree = updatedStatus.state == "scanning" || (previousState == "scanning" && updatedStatus.state != "scanning")
             if refreshTree, let selectedCourseID {
                 await loadTree(courseID: selectedCourseID, token: treeRequestToken)

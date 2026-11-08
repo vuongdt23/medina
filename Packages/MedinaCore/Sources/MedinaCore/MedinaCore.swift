@@ -1,15 +1,99 @@
 import Foundation
 
+public struct CourseProgressSummary: Codable, Hashable, Sendable {
+    public var completedCount: Int
+    public var totalCount: Int
+    public var percent: Int
+
+    public init(completedCount: Int = 0, totalCount: Int = 0, percent: Int = 0) {
+        self.completedCount = completedCount
+        self.totalCount = totalCount
+        self.percent = percent
+    }
+
+    public var fraction: Double {
+        if totalCount > 0 {
+            return min(1, max(0, Double(completedCount) / Double(totalCount)))
+        }
+        return min(1, max(0, Double(percent) / 100))
+    }
+}
+
 public struct Course: Codable, Identifiable, Hashable, Sendable {
     public let id: String
     public let title: String
     public var originalName: String?
     public var position: Int?
+    public var thumbnailUrl: String?
+    public var progress: CourseProgressSummary?
+
+    public init(id: String, title: String, originalName: String? = nil, position: Int? = nil,
+                thumbnailUrl: String? = nil, progress: CourseProgressSummary? = nil) {
+        self.id = id
+        self.title = title
+        self.originalName = originalName
+        self.position = position
+        self.thumbnailUrl = thumbnailUrl
+        self.progress = progress
+    }
 }
 
 public struct CoursePage: Decodable, Sendable {
     public var items: [Course]?
     public var nextCursor: String?
+}
+
+public struct SearchResponse: Decodable, Sendable {
+    public var query: String
+    public var items: [SearchResult]
+}
+
+public struct SearchResult: Codable, Identifiable, Hashable, Sendable {
+    public var id: String
+    public var type: String
+    public var title: String
+    public var originalName: String?
+    public var courseId: String
+    public var coursePath: String
+    public var streamUrl: String?
+    public var thumbnailUrl: String?
+
+    public init(id: String, type: String, title: String, originalName: String? = nil,
+                courseId: String, coursePath: String, streamUrl: String? = nil,
+                thumbnailUrl: String? = nil) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.originalName = originalName
+        self.courseId = courseId
+        self.coursePath = coursePath
+        self.streamUrl = streamUrl
+        self.thumbnailUrl = thumbnailUrl
+    }
+}
+
+public struct RecentProgressResponse: Decodable, Sendable {
+    public var items: [RecentProgressItem]
+}
+
+public struct RecentProgressItem: Codable, Identifiable, Hashable, Sendable {
+    public var itemId: String
+    public var title: String
+    public var courseId: String
+    public var coursePath: String
+    public var positionSeconds: Double
+    public var durationSeconds: Double
+    public var completed: Bool
+    public var updatedAt: String?
+    public var streamUrl: String?
+    public var thumbnailUrl: String?
+
+    public var id: String { itemId }
+
+    public var fraction: Double {
+        guard durationSeconds > 0 else { return completed ? 1 : 0 }
+        return min(1, max(0, positionSeconds / durationSeconds))
+    }
 }
 
 public struct APIErrorEnvelope: Decodable, Sendable {
@@ -58,7 +142,7 @@ public struct LessonProgress: Codable, Hashable, Sendable {
     /// A lesson counts as finished when the server marked it complete or the
     /// viewer reached the last stretch of a lesson with a known duration.
     public var isEffectivelyComplete: Bool {
-        completed || (durationSeconds > 0 && positionSeconds / durationSeconds >= 0.9)
+        completed || (durationSeconds > 0 && positionSeconds / durationSeconds >= 0.95)
     }
 }
 
@@ -117,6 +201,7 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
     public var durationSeconds: Double?
     public var streamUrl: String?
     public var contentUrl: String?
+    public var thumbnailUrl: String?
     public var children: [TreeNode]?
     public var sections: [TreeNode]?
     public var lessons: [TreeNode]?
@@ -127,14 +212,17 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
                 position: Int? = nil, mediaKind: String? = nil, mimeType: String? = nil,
                 extension fileExtension: String? = nil, sizeBytes: Int64? = nil,
                 durationSeconds: Double? = nil, streamUrl: String? = nil,
-                contentUrl: String? = nil, children: [TreeNode]? = nil,
+                contentUrl: String? = nil, thumbnailUrl: String? = nil,
+                children: [TreeNode]? = nil,
                 sections: [TreeNode]? = nil, lessons: [TreeNode]? = nil,
                 assets: [TreeNode]? = nil, subtitles: [TreeNode]? = nil) {
         self.id = id; self.type = type; self.title = title; self.originalName = originalName
         self.position = position; self.mediaKind = mediaKind; self.mimeType = mimeType
         self.fileExtension = fileExtension; self.sizeBytes = sizeBytes; self.durationSeconds = durationSeconds
         self.streamUrl = streamUrl
-        self.contentUrl = contentUrl; self.children = children; self.sections = sections
+        self.contentUrl = contentUrl
+        self.thumbnailUrl = thumbnailUrl
+        self.children = children; self.sections = sections
         self.lessons = lessons; self.assets = assets; self.subtitles = subtitles
     }
 
@@ -158,7 +246,7 @@ public struct TreeNode: Codable, Identifiable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, type, title, originalName, position, mediaKind, mimeType, sizeBytes, durationSeconds
-        case streamUrl, contentUrl, children, sections, lessons, assets, subtitles
+        case streamUrl, contentUrl, thumbnailUrl, children, sections, lessons, assets, subtitles
         case fileExtension = "extension"
     }
 }
@@ -404,6 +492,18 @@ public enum CourseTree {
         }
 
         return false
+    }
+
+    /// Finds any indexed tree node, including nested resource folders.
+    public static func item(id: String, in root: TreeNode) -> TreeNode? {
+        if root.id == id { return root }
+        let collections = [root.sections, root.lessons, root.assets, root.subtitles, root.children]
+        for collection in collections {
+            for child in collection ?? [] {
+                if let match = item(id: id, in: child) { return match }
+            }
+        }
+        return nil
     }
 
     /// Depth-first lesson order shared by the outline and playback queue.
@@ -671,7 +771,7 @@ public final class MedinaAPIClient: Sendable {
     public func libraries() async throws -> [Library] { try await get("/api/v1/libraries") }
     public func indexStatus() async throws -> IndexStatus { try await get("/api/v1/index/status") }
 
-    public func courses(libraryID: String) async throws -> [Course] {
+    public func courses(libraryID: String, profileID: String? = nil) async throws -> [Course] {
         var cursor: String?
         var seen = Set<String>()
         var all: [Course] = []
@@ -679,12 +779,43 @@ public final class MedinaAPIClient: Sendable {
             var components = URLComponents(url: endpoint("/api/v1/libraries/\(pathSegment(libraryID))/courses"), resolvingAgainstBaseURL: false)!
             components.queryItems = [URLQueryItem(name: "limit", value: "100")]
             if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
-            let page: CoursePage = try await request(components.url!)
+            var request = URLRequest(url: components.url!)
+            request.timeoutInterval = 10
+            if let profileID, !profileID.isEmpty {
+                request.setValue(profileID, forHTTPHeaderField: "X-Medina-Profile")
+            }
+            let page: CoursePage = try await send(request)
             all.append(contentsOf: page.items ?? [])
             cursor = page.nextCursor
             if let cursor, !seen.insert(cursor).inserted { throw MedinaAPIError.invalidResponse }
         } while cursor != nil
         return all
+    }
+
+    public func search(query: String, type: String? = nil, limit: Int = 50) async throws -> SearchResponse {
+        var components = URLComponents(url: endpoint("/api/v1/search"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "limit", value: String(min(100, max(1, limit)))),
+        ]
+        if let type, !type.isEmpty {
+            components.queryItems?.append(URLQueryItem(name: "type", value: type))
+        }
+        return try await request(components.url!)
+    }
+
+    public func recentProgress(profileID: String, limit: Int = 20,
+                               includeCompleted: Bool = false) async throws -> [RecentProgressItem] {
+        var components = URLComponents(url: endpoint("/api/v1/progress/recent"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "limit", value: String(min(100, max(1, limit)))),
+            URLQueryItem(name: "includeCompleted", value: includeCompleted ? "true" : "false"),
+        ]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 10
+        request.setValue(profileID, forHTTPHeaderField: "X-Medina-Profile")
+        let response: RecentProgressResponse = try await send(request)
+        return response.items
     }
 
     public func tree(courseID: String) async throws -> TreeNode {
@@ -701,23 +832,41 @@ public final class MedinaAPIClient: Sendable {
         return try await send(request)
     }
 
-    /// Stores playback progress for a lesson and returns the persisted record.
+    /// `completed` is deliberately optional. Routine playback writes omit the
+    /// field so a sticky server-side completion cannot be reopened by accident.
+    /// Pass true for an explicit completion and false only for an explicit reopen.
     @discardableResult
-    public func putLessonProgress(id: String, profileID: String, _ body: LessonProgress) async throws -> LessonProgress {
+    public func putLessonProgress(id: String, profileID: String, _ body: LessonProgress,
+                                  completed: Bool? = nil) async throws -> LessonProgress {
         var request = URLRequest(url: endpoint("/api/v1/lessons/\(pathSegment(id))/progress"))
         request.httpMethod = "PUT"
         request.timeoutInterval = 10
         request.setValue(profileID, forHTTPHeaderField: "X-Medina-Profile")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        struct Payload: Encodable { var positionSeconds: Double; var durationSeconds: Double; var completed: Bool }
+        struct Payload: Encodable {
+            var positionSeconds: Double
+            var durationSeconds: Double
+            var completed: Bool?
+        }
         request.httpBody = try JSONEncoder().encode(Payload(positionSeconds: body.positionSeconds,
                                                             durationSeconds: body.durationSeconds,
-                                                            completed: body.completed))
+                                                            completed: completed))
         return try await send(request)
     }
 
     public func resolve(_ serverPath: String) -> URL {
         URL(string: serverPath, relativeTo: profile.origin)!.absoluteURL
+    }
+
+    /// Loads a server-advertised thumbnail using URLSession's HTTP cache and
+    /// validation behavior. Callers should only invoke this for an advertised URL.
+    public func thumbnailData(at serverPath: String) async throws -> Data {
+        var request = URLRequest(url: resolve(serverPath), cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MedinaAPIError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else { throw httpStatusError(http.statusCode, data: data) }
+        return data
     }
 
     public func assetPreviewURL(id: String) -> URL {
